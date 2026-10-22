@@ -58,16 +58,16 @@ export function analyseImage(src){
 }
 export function colorSuggestions(profile){
  const primary=profile?.color||'#8c867b',colors=profile?.colors||[{color:primary,share:1,hsl:rgbToHsl(...hexRgb(primary))}];
- const chromatic=colors.find(c=>c.hsl[1]>.22&&c.share>.09),base=chromatic?.hsl||profile?.hsl||[35,.1,.5],h=base[0],s=clamp(base[1],.08,.5),white=luminance(primary)>.58,dark=luminance(primary)<.1;
+ const chromatic=[...colors].filter(c=>c.hsl[1]>.22&&c.share>.12).sort((a,b)=>b.share-a.share)[0],base=chromatic?.hsl||profile?.hsl||[35,.1,.5],h=base[0],s=clamp(base[1],.04,.38),white=luminance(primary)>.58,dark=luminance(primary)<.1;
  const separation=(color)=>{
-  let c=color;const [,cs,cl]=rgbToHsl(...hexRgb(c));if(contrast(primary,c)<1.65)c=hsl(h+170,Math.min(cs,.15),white?.61:dark?.92:cl>.6?.95:.18);return c;
+  let c=color;const [,cs,cl]=rgbToHsl(...hexRgb(c));if(contrast(primary,c)<1.65)c=hsl(h,Math.min(cs,.1),white?.61:dark?.92:cl>.6?.95:.18);return c;
  };
  const make=(name,note,bg,secondary,accent)=>{bg=separation(bg);return {name,note,bg,secondary,accent,ink:inkFor(bg),score:contrast(primary,bg)};};
  return [
-  make('Спокойный контраст','Фон отделяет силуэт товара',hsl(h+175,s*.18,white?.64:.95),hsl(h+175,s*.25,white?.52:.83),hsl(h+175,s*.7,.38)),
-  make('Оттенки товара',chromatic?'Акцент взят из заметной детали':'Нейтральная палитра для спокойного товара',hsl(h,s*.12,white?.68:.94),hsl(h,s*.28,white?.52:.8),hsl(h,s*.8,.36)),
-  make('Мягкая студия','Тёплые или прохладные нейтральные тона',white?'#b4afa2':'#f0ece4',white?'#d7cfbc':'#d7cdbb',hsl(h,Math.min(s,.3),.35)),
-  make(dark?'Светлый акцент':'Глубокий фон',dark?'Светлая основа для тёмного силуэта':'Выразительный фон без яркого шума',hsl(h,s*.25,dark?.82:.19),hsl(h,s*.32,dark?.65:.31),hsl(h+25,s*.5,dark?.25:.8)),
+  make('Нейтральная основа','Фон отделяет силуэт товара',hsl(h,s*.06,white?.63:.96),hsl(h,s*.1,white?.72:.87),hsl(h,s*.45,.38)),
+  make('Оттенки товара',chromatic?'Акцент взят из заметной детали':'Нейтральная палитра для спокойного товара',hsl(h,Math.min(s*.3,.1),white?.64:.91),hsl(h,Math.min(s*.4,.14),white?.73:.81),hsl(h,s*.8,.36)),
+  make('Мягкая студия','Тёплые или прохладные нейтральные тона',white?'#aaa69d':hsl(h<70||h>320?38:215,.1,.94),white?'#d7cfbc':'#d7cdbb',hsl(h,Math.min(s,.3),.35)),
+  make(dark?'Светлый акцент':'Глубокий фон',dark?'Светлая основа для тёмного силуэта':'Выразительный фон без яркого шума',hsl(h,s*.25,dark?.82:.19),hsl(h,s*.32,dark?.65:.31),hsl(h,s*.35,dark?.25:.8)),
  ];
 }
 export async function productProfile(project){await loadImages([{nodes:project.assets.map(a=>({type:'image',src:a.url}))}]);return analyseImage(project.assets[0].url);}

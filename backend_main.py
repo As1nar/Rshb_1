@@ -83,7 +83,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="AgroVision API", version="2.2.0", lifespan=lifespan)
+app = FastAPI(title="AgroVision API", version="2.3.0", lifespan=lifespan)
 
 
 class Fact(BaseModel):
@@ -154,11 +154,22 @@ def health():
 async def create_project(
     product_image: UploadFile = File(...),
     details: list[UploadFile] = File(default=[]),
+    views: list[UploadFile] = File(default=[]),
+    view_types_json: str = Form("[]"),
     remove_product_background: bool = Form(True),
     remove_details_background: bool = Form(False),
     background_quality: Literal["fast", "balanced", "detail"] = Form("fast"),
     use_vision: bool = Form(True),
 ):
+    if len(views) > 7:
+        raise HTTPException(422, "До восьми ракурсов вместе с основным фото")
+    try:
+        view_types = json.loads(view_types_json)
+        allowed = {"front", "back", "left", "right", "top", "threequarter", "other"}
+        if not isinstance(view_types, list) or len(view_types) > 8 or any(v not in allowed for v in view_types):
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise HTTPException(422, "Некорректные названия ракурсов")
     if len(details) > 5:
         raise HTTPException(422, "Можно загрузить до 5 дополнительных фотографий")
     project_id = str(uuid4())
@@ -166,7 +177,7 @@ async def create_project(
     folder.mkdir()
     assets = []
     try:
-        for i, upload in enumerate([product_image, *details]):
+        for i, upload in enumerate([product_image, *views, *details]):
             raw = await upload.read(MAX_BYTES + 1)
             await upload.close()
             if len(raw) > MAX_BYTES:
@@ -180,11 +191,12 @@ async def create_project(
                         raise ValueError("pixels")
                     path = folder / f"original_{i}.png"
                     image.save(path)
-                    asset = {"id": f"image_{i}", "role": "product" if i == 0 else "detail",
+                    asset = {"id": f"image_{i}", "role": "product" if i == 0 else "view" if i <= len(views) else "detail",
+                                   "view_type": view_types[i] if i < len(view_types) else "other",
                                    "original": f"/uploads/{project_id}/{path.name}",
                                    "url": f"/uploads/{project_id}/{path.name}",
                                    "width": image.width, "height": image.height,
-                                   "remove": remove_product_background if i == 0 else remove_details_background}
+                                   "remove": remove_product_background if i <= len(views) else remove_details_background}
                     # Trim transparent margins even when background removal was not requested.
                     bounds = image.getchannel("A").getbbox()
                     if bounds and bounds != (0, 0, image.width, image.height):

@@ -1,3 +1,4 @@
+import {drawOutline} from './outline.js';
 import {renderSelection} from './transform.js';
 import {imageCache,loadImages} from './assets.js';
 import {analyseImage,inkFor,contrast} from './color.js';
@@ -5,7 +6,7 @@ export {imageCache,loadImages};
 // One scene model and renderer for editing, live previews and PNG export.
 export const FONTS=['Manrope','Cormorant Garamond','DejaVu Sans','DejaVu Serif','DejaVu Mono'];
 export const STYLES={
-  studio:{name:'Минимализм',note:'Воздух · крупный фрагмент · тонкие линии',bg:'#efeee8',ink:'#292b27',accent:'#897a60',soft:'#ddd8cb',backgroundMode:'arch'},
+  studio:{name:'Минимализм',note:'Воздух · крупный фрагмент · тонкие линии',bg:'#efeee8',ink:'#292b27',accent:'#897a60',soft:'#ddd8cb',backgroundMode:'plain'},
   organic:{name:'Уютный',note:'Тёплый свет · мягкие формы · спокойные подписи',bg:'#e8dace',ink:'#49382d',accent:'#997257',soft:'#c4a88f',backgroundMode:'cozy'},
   promo:{name:'Геометрия',note:'Чёткая форма · цветовой акцент · ячейки',bg:'#f4f6f8',ink:'#162c36',accent:'#0298b5',soft:'#d9edf1',backgroundMode:'diagonal'},
 };
@@ -47,12 +48,13 @@ export function backgroundNodes(scene,settings){
 }
 export function applyBackground(scene,settings){scene.background=settings.bg;scene.backgroundSettings=structuredClone(settings);scene.nodes=[...backgroundNodes(scene,settings),...scene.nodes.filter(n=>!n.backgroundRole)];}
 export function buildScenes(project,settings){
- const style=STYLES[settings.style]||STYLES.studio,p=project.product,source=project.assets[0];
+ const style=STYLES[settings.style]||STYLES.studio,p=project.product,views=project.assets.filter(a=>a.role==='product'||a.role==='view');
  const facts=p.facts.filter(f=>f.confirmed&&f.value.trim()),ink=inkFor(settings.bg||style.bg),accent=settings.accent||style.accent;
- const extras=project.assets.slice(1).map(a=>({...a,usage:settings.assetRoles?.[a.id]||'auto'})).filter(a=>a.usage!=='omit');
+ const extras=project.assets.filter(a=>a.role==='detail').map(a=>({...a,usage:settings.assetRoles?.[a.id]||'auto'})).filter(a=>a.usage!=='omit');
  const titleName=p.name||p.category||'Ваш товар',profiles=new Map(project.assets.map(a=>[a.url,analyseImage(a.url)]));
  return settings.templates.map((template,sceneIndex)=>{
   const [W,H]=settings.format==='16:9'?[1600,900]:settings.format==='9:16'?[900,1600]:settings.format==='3:4'?[1200,1600]:[1200,1200];
+  const source=views[sceneIndex%views.length]||project.assets[0],minimal=settings.style==='studio';
   const S=Math.min(W,H),nodes=[],notes=[],used=new Set();
   const add=(type,title,x,y,w,h,extra={})=>{const n=node(type,title,W*x/100,H*y/100,W*w/100,H*h/100,extra);nodes.push(n);return n;};
   const text=(title,value,x,y,w,h,size=40,extra={})=>add('text',title,x,y,w,h,{text:String(value),font:settings.font||FONTS[0],fontSize:size*S/1200,bold:false,align:'left',fill:ink,...extra});
@@ -74,13 +76,13 @@ export function buildScenes(project,settings){
    return n;
   };
   const frame=(asset,x,y,w,h,index=0,circle=false)=>{
-   shape('Рамка детали',x-.6,y-.4,w+1.2,h+.8,settings.style==='organic'?'#fff8ed':'#ffffff',{radius:circle?S:S*.025,shadow:true});
-   const n=cropped(asset,x,y,w,h,index,{zoom:asset===source?1.85:1.08,radius:circle?S:S*.02,clipShape:circle?'ellipse':'rounded'});
+   if(!minimal)shape('Рамка детали',x-.6,y-.4,w+1.2,h+.8,settings.style==='organic'?'#fff8ed':'#ffffff',{radius:circle?S:S*.025,shadow:true});
+   const n=cropped(asset,x,y,w,h,index,{zoom:asset===source?1.35:1.08,radius:circle?S:S*.02,clipShape:circle?'ellipse':'rounded'});
    const caption=settings.assetCaptions?.[asset.id];if(caption)text('Подпись детали',caption,x,y+h+1,w,6,24);
    return n;
   };
   const cell=(f,x,y,w=28,h=15,i=0)=>{
-   const boxed=settings.bubble!=='none',cellInk=boxed?'#243039':ink;
+   const boxed=!minimal&&settings.bubble!=='none',cellInk=boxed?'#243039':ink;
    if(boxed)shape('Ячейка: '+f.label,x,y,w,h,settings.style==='organic'?'#fff9f0':'#ffffff',{shape:settings.bubble,opacity:settings.style==='organic'?.89:.97,shadow:settings.style==='promo'});
    // A small geometric sign carries no extra product claim.
    if(settings.style==='promo')shape('Акцент характеристики',x+2,y+2,1,h-4,accent,{radius:3});
@@ -89,7 +91,7 @@ export function buildScenes(project,settings){
    text('Подпись: '+f.label,f.label,x+inset,y+h*.64,w-inset-2,h*.25,28,{fill:cellInk,fixedCellInk:boxed});
   };
   const header=template==='dimensions'?'Размеры':template==='closeups'?'В деталях':titleName;
-  text('Название товара',header,6,4,88,16,header.length<13?178:112,{bold:true});
+  text('Название товара',header,6,4,88,16,header.length<13?178:112,{bold:!minimal});
   if(['dimensions','closeups'].includes(template))text('Название модели',titleName,6,20,85,5,25);
   let main;
   const product=(x,y,w,h,withPedestal=false)=>{
@@ -98,8 +100,8 @@ export function buildScenes(project,settings){
     add('pedestal','Подставка',px,py,pw,ph,{fill:settings.pedestalColor||style.soft,kind:settings.pedestal,depth:.32});
    }
    main=fitted(source,x,y,w,h);
-   const sh=shape('Контактная тень',main.x/W*100+main.w/W*15,(main.y+main.h)/H*100-.8,main.w/W*70,2,'#1e2421',{shape:'ellipse',opacity:.12,blur:S*.009});
-   nodes.splice(nodes.indexOf(main),0,nodes.pop());
+   if(!minimal){const sh=shape('Контактная тень',main.x/W*100+main.w/W*15,(main.y+main.h)/H*100-.8,main.w/W*70,2,'#1e2421',{shape:'ellipse',opacity:.12,blur:S*.009});
+   nodes.splice(nodes.indexOf(main),0,nodes.pop());}
    return main;
   };
   if(template==='hero'){
@@ -115,7 +117,7 @@ export function buildScenes(project,settings){
    if(height){line('Высота',Math.max(15,mx-5),my,0,mh,{arrow:true,doubleArrow:true});text('Значение высоты',height.value,1,my+mh*.4,13,11,40);}else notes.push('Для размерной линии нужна высота.');
   }else if(template==='closeups'){
    main=cropped(source,39,25,67,75,1,{zoom:1.35,radius:0});
-   shape('Панель деталей',5,28,37,65,settings.style==='organic'?'#fff5e8':'#ffffff',{opacity:.8,radius:S*.04});
+   if(!minimal)shape('Панель деталей',5,28,37,65,settings.style==='organic'?'#fff5e8':'#ffffff',{opacity:.8,radius:S*.04});
    const candidates=extras.filter(a=>a.usage!=='decor'&&!(a.usage==='auto'&&profiles.get(a.url)?.hasAlpha)),frames=[...candidates,source,source,source].slice(0,3);
    frames.forEach((a,i)=>frame(a,8,31+i*20,30,17,i));
   }else if(template==='callouts'){
@@ -126,7 +128,7 @@ export function buildScenes(project,settings){
   }else{
    main=cropped(source,39,24,69,80,1,{zoom:1.55,radius:0});
    const description=p.description||facts.slice(0,2).map(f=>`${f.label}: ${f.value}`).join('. ');
-   if(description){shape('Подложка описания',4,30,36,42,settings.style==='organic'?'#fff7ea':'#ffffff',{opacity:.9,radius:S*.025});text('Короткое описание',description,7,33,30,36,35,{fill:'#29332f',fixedCellInk:true});}
+   if(description){if(!minimal)shape('Подложка описания',4,30,36,42,settings.style==='organic'?'#fff7ea':'#ffffff',{opacity:.9,radius:S*.025});text('Короткое описание',description,7,33,30,36,35,{fill:'#29332f',fixedCellInk:true});}
   }
   // Use uploaded images in every content family. Photos become detail windows;
   // transparent assets become supporting objects behind the main silhouette.
@@ -207,7 +209,7 @@ export function renderScene(ctx,scene,selected=null){
       colors.forEach((color,i)=>gradient.addColorStop(i/(colors.length-1),color));ctx.fillStyle=gradient;
     }
     if(n.type==='shape'&&n.pattern){ctx.fillStyle=n.fill;ctx.strokeStyle=n.fill;ctx.lineWidth=1.8;const step=Math.max(22,scene.width*.026);for(let x=step/2;x<n.w;x+=step)for(let y=step/2;y<n.h;y+=step){ctx.beginPath();if(n.pattern==='dots'){ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();}else{ctx.moveTo(x-4,y);ctx.lineTo(x+4,y);if(n.pattern==='cross'){ctx.moveTo(x,y-4);ctx.lineTo(x,y+4);}ctx.stroke();}}}
-    if(n.type==='shape'&&!n.pattern){if(n.blur)ctx.filter=`blur(${n.blur}px)`;if(n.shadow){ctx.shadowColor='#102f3520';ctx.shadowBlur=18;ctx.shadowOffsetY=7;}path(ctx,n);ctx.fill();}
+    if(n.type==='shape'&&!n.pattern){if(n.blur)ctx.filter=`blur(${n.blur}px)`;if(n.shadow){ctx.shadowColor='#102f3520';ctx.shadowBlur=18;ctx.shadowOffsetY=7;}path(ctx,n);ctx.fill();if(n.outlineWidth){ctx.strokeStyle=n.outlineColor||'#ffffff';ctx.lineWidth=n.outlineWidth;ctx.stroke();}}
     if(n.type==='pedestal'){
       const c=n.fill||'#d8c7ad',w=n.w,h=n.h;
       ctx.save();ctx.shadowColor='#201b1840';ctx.shadowBlur=h*.18;ctx.shadowOffsetY=h*.14;
@@ -230,6 +232,7 @@ export function renderScene(ctx,scene,selected=null){
     }
     if(n.type==='image'){
       const img=imageCache.get(n.src);
+      if(img&&n.outlineWidth)drawOutline(ctx,n,img);
       ctx.beginPath();if(n.clipShape==='ellipse')ctx.ellipse(n.w/2,n.h/2,n.w/2,n.h/2,0,0,Math.PI*2);else ctx.roundRect(0,0,n.w,n.h,Math.min(n.radius||0,n.w/2,n.h/2));ctx.clip();
       if(img){
         ctx.filter=`brightness(${n.brightness??1}) contrast(${n.contrast??1}) saturate(${n.saturation??1})`;

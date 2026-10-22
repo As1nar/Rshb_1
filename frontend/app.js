@@ -3,6 +3,9 @@ import {FONTS,STYLES,TEMPLATES,uid,node,buildScenes,loadImages,loadFonts,renderS
 import {productProfile,colorSuggestions,harmonyProposal,inkFor,contrast,analyseImage,rgbToHsl,hexRgb} from './color.js';
 const $=id=>document.getElementById(id), canvas=$('canvas'),ctx=canvas.getContext('2d');
 let project=null, settings={style:'studio',format:'3:4',bg:STYLES.studio.bg,backgroundMode:STYLES.studio.backgroundMode,secondary:STYLES.studio.soft,accent:STYLES.studio.accent,backgroundStrength:.7,backgroundAngle:125,pedestal:'none',pedestalColor:'#d8c7ad',bubble:'rounded',font:FONTS[0],templates:['hero'],background:null,pattern:'none',assetRoles:{},assetCaptions:{}};
+let cropId=null;
+const viewNames={front:'Спереди',threequarter:'Три четверти',back:'Сзади',left:'Слева',right:'Справа',top:'Сверху',other:'Другой ракурс'};
+let uploadViews=[];
 let active=0,selected=null,history=[],future=[],pollToken=0,drag=null,toastTimer,nameTouched=false,dirty=false;
 let profile=null,profileKey=null,previewToken=0,templatePreviewToken=0,previewMode='product',harmony=null,harmonyActive=false;
 const scene=()=>project?.scenes[active], selectedNode=()=>scene()?.nodes.find(n=>n.id===selected);
@@ -22,7 +25,7 @@ function syncDesign(){
 }
 function renderChoices(){
   $('style-options').replaceChildren(...Object.entries(STYLES).map(([key,s])=>{
-    const b=button('',()=>{settings.style=key;settings.font=FONTS[0];settings.pattern=key==='promo'?'cross':'none';settings.bg=s.bg;settings.accent=s.accent;settings.secondary=s.soft;settings.backgroundMode=s.backgroundMode;syncDesign();},'style-choice'+(settings.style===key?' selected':''));
+    const b=button('',()=>{settings.style=key;settings.bubble=key==='studio'?'none':'rounded';settings.pedestal='none';settings.font=FONTS[0];settings.pattern=key==='promo'?'cross':'none';settings.bg=s.bg;settings.accent=s.accent;settings.secondary=s.soft;settings.backgroundMode=s.backgroundMode;syncDesign();},'style-choice'+(settings.style===key?' selected':''));
     b.setAttribute('aria-pressed',String(settings.style===key));b.append(element('span','',`style-art ${key}`),element('strong',s.name),element('small',s.note));return b;
   }));
   $('template-options').replaceChildren(...TEMPLATES.map(([id,num,title,desc])=>{
@@ -34,11 +37,25 @@ for(const select of document.querySelectorAll('.font-select'))FONTS.forEach(font
 for(const [id,key] of [['format','format'],['bg-color','bg'],['pedestal','pedestal'],['pedestal-color','pedestalColor'],['bubble','bubble'],['design-font','font']])$(id).addEventListener('input',()=>{settings[key]=$(id).value;renderDesignPreview();});
 $('clear-bg').onclick=()=>{settings.background=null;$('bg-file').value='';renderDesignPreview();message('Фотография фона убрана');};
 $('bg-file').onchange=()=>run(async()=>{const file=$('bg-file').files[0];if(!file)return;const data=new FormData();data.set('image',file);const result=await api(`/api/projects/${project.id}/background`,{method:'POST',body:data});settings.background=result.url;renderDesignPreview();message('Фон загружен');});
-let previewUrl=null;
-$('product-file').onchange=()=>{if(previewUrl)URL.revokeObjectURL(previewUrl);$('upload-preview').replaceChildren();const file=$('product-file').files[0];if(file){previewUrl=URL.createObjectURL(file);const img=element('img');img.src=previewUrl;img.alt='Предпросмотр товара';$('upload-preview').append(img);}};
+function renderUploadViews(){
+ const host=$('upload-preview');host.replaceChildren();
+ uploadViews.forEach((slot,i)=>{
+  const card=element('div',undefined,'view-slot'),img=element('img');img.src=slot.url;img.alt=viewNames[slot.type];
+  const menu=element('details'),summary=element('summary',(i===0?'★ Основное · ':'')+viewNames[slot.type]);menu.append(summary);
+  const select=element('select');select.setAttribute('aria-label','Ракурс фото '+(i+1));Object.entries(viewNames).forEach(([v,t])=>select.append(new Option(t,v)));select.value=slot.type;select.onchange=()=>{slot.type=select.value;renderUploadViews();};menu.append(select);
+  menu.append(button('Сделать основным',()=>{uploadViews.splice(i,1);uploadViews.unshift(slot);renderUploadViews();}),button('Удалить фото',()=>{URL.revokeObjectURL(slot.url);uploadViews.splice(i,1);renderUploadViews();}));
+  card.append(img,menu);host.append(card);
+ });
+}
+$('product-file').onchange=()=>{
+ const files=[...$('product-file').files];if(uploadViews.length+files.length>8)return message('До восьми ракурсов. Удалите лишние фото.');
+ files.forEach(file=>uploadViews.push({file,url:URL.createObjectURL(file),type:uploadViews.length?'other':'front'}));renderUploadViews();
+};
 $('upload-form').onsubmit=event=>{event.preventDefault();run(async()=>{
   if($('detail-files').files.length>5)throw Error('Можно добавить до пяти фотографий деталей');
-  const data=new FormData($('upload-form'));
+  if(!uploadViews.length)throw Error('Добавьте фото товара');
+  const data=new FormData($('upload-form'));data.delete('product_image');data.set('product_image',uploadViews[0].file);
+  uploadViews.slice(1).forEach(s=>data.append('views',s.file));data.set('view_types_json',JSON.stringify(uploadViews.map(s=>s.type)));
   for(const key of ['remove_product_background','remove_details_background','use_vision'])data.set(key,$('upload-form').elements[key].checked?'true':'false');
   if(!$('detail-files').files.length)data.delete('details');
   const submit=$('upload-form').querySelector('[type=submit]');submit.disabled=true;
@@ -128,7 +145,7 @@ async function save(){
   project.assessment=result.assessment;dirty=false;renderAssessment();message('Проект сохранён');
 }
 $('save').onclick=()=>run(save);
-function draw(){if(scene()){const current=harmony&&harmonyActive&&harmony.sceneId===scene().id?harmonizedScene(scene(),harmony.proposal):scene();renderScene(ctx,current,selected);}}
+function draw(){canvas.dataset.cropping=String(cropId===selected&&!!selected);if(scene()){const current=harmony&&harmonyActive&&harmony.sceneId===scene().id?harmonizedScene(scene(),harmony.proposal):scene();renderScene(ctx,current,selected);}}
 function renderEditor(){
   $('scene-tabs').replaceChildren(...project.scenes.map((s,i)=>button(`${i+1}. ${s.title}`,()=>{active=i;selected=null;clearHarmony();renderEditor();},i===active?'selected':'')));
   canvas.width=scene().width;canvas.height=scene().height;canvas.style.aspectRatio=`${scene().width}/${scene().height}`;
@@ -137,7 +154,7 @@ function renderEditor(){
   const scale=Math.min(available/scene().width,maxHeight/scene().height);
   canvas.style.width=`${Math.max(150,scene().width*scale)}px`;canvas.style.height=`${Math.max(150/scene().width*scene().height,scene().height*scale)}px`;
   $('scene-bg').value=scene().background;$('editor-title').textContent=scene().title;
-  $('add-image').replaceChildren(new Option('Выберите изображение',''),...project.assets.map((a,i)=>new Option(i?'Фото детали '+i:'Товар',a.id)));
+  $('add-image').replaceChildren(new Option('Выберите изображение',''),...project.assets.map((a,i)=>new Option(a.role==='view'?(viewNames[a.view_type]||'Ракурс'):i?'Фото детали '+i:'Товар',a.id)));
   renderLayers();renderProperties();renderBackgroundPanel();draw();renderAssessment();$('undo').disabled=!history.length;$('redo').disabled=!future.length;
   run(async()=>{await loadImages(project.scenes);draw();});
 }
@@ -173,7 +190,7 @@ function field(title,value,type,onChange,options={}){
     onChange(next);if(output)output.textContent=format(next);draw();renderAssessment();renderLayers();
     if(selectedNode()?.type==='image')run(async()=>{await loadImages(project.scenes);draw();});
   });
-  input.addEventListener(type==='range'?'input':'change',apply);
+  input.addEventListener(['range','color'].includes(type)?'input':'change',apply);
   input.addEventListener('change',()=>recorded=false);
   if(output)label.append(output);label.append(input);return label;
 }
@@ -193,11 +210,15 @@ function renderProperties(){
     host.append(button(n.backplate?'Подложка текста: есть':'Добавить подложку текста',()=>{checkpoint();n.backplate=n.backplate?null:'#ffffff';renderEditor();}));
     if(n.backplate)host.append(field('Цвет подложки',n.backplate,'color',v=>n.backplate=v),field('Прозрачность подложки',n.backplateOpacity??.88,'range',v=>n.backplateOpacity=v,{min:0,max:1,step:.05,percent:true}));
   }
-  if(n.fill)host.append(field('Цвет',n.fill,'color',v=>n.fill=v));
+  if(n.fill)host.append(field('Цвет',n.fill,'color',v=>{n.fill=v;if(n.paint)n.paint.colors[0]=v;}));
   if(n.type==='shape')host.append(field('Форма',n.shape,'select',v=>n.shape=v,{values:['rect','rounded','capsule','ellipse','blob']}));
   if(['shape','image'].includes(n.type))host.append(field('Скругление',n.radius||0,'range',v=>n.radius=v,{min:0,max:500}));
   if(n.type==='pedestal')host.append(field('Подставка',n.kind,'select',v=>n.kind=v,{values:['cylinder','box']}),field('Толщина платформы',n.depth??.36,'range',v=>n.depth=v,{min:.1,max:.65,step:.05}));
+  if(['image','shape'].includes(n.type))host.append(field('Обводка, px',n.outlineWidth||0,'range',v=>n.outlineWidth=v,{min:0,max:30,step:1}),field('Цвет обводки',n.outlineColor||'#ffffff','color',v=>n.outlineColor=v));
   if(n.type==='image'){
+    const views=project.assets.filter(a=>a.role==='product'||a.role==='view'),gallery=element('div',undefined,'angle-gallery');
+    if(views.length>1){host.append(element('strong','Ракурс · замена одним кликом'));for(const a of views){const b=button('',async()=>{checkpoint();n.src=a.url;n.assetId=a.id;n.cropX=0;n.cropY=0;n.zoom=1;await loadImages(project.scenes);renderProperties();draw();});const im=element('img');im.src=a.url;im.alt=viewNames[a.view_type]||'Основной';b.title=im.alt;b.append(im,element('small',im.alt));gallery.append(b);}host.append(gallery);}
+    host.append(button(cropId===n.id?'✓ Завершить кадрирование':'✥ Изменить фрагмент на холсте',()=>{cropId=cropId===n.id?null:n.id;renderProperties();draw();}),element('p',cropId===n.id?'Тяните фото внутри рамки. Колесо мыши — масштаб. Escape — готово.':'Двойной щелчок по фото открывает кадрирование.','hint'));
     host.append(field('Размещение',n.fit,'select',v=>n.fit=v,{values:['contain','cover']}),field('Масштаб внутри рамки',n.zoom||1,'range',v=>n.zoom=v,{min:.1,max:6,step:.1,percent:true}),field('Сдвиг фото X, %',n.cropX||0,'range',v=>n.cropX=v,{min:-100,max:100}),field('Сдвиг фото Y, %',n.cropY||0,'range',v=>n.cropY=v,{min:-100,max:100}));
     host.append(field('Заменить фото',n.src,'select',v=>n.src=v,{values:[...new Set([n.src,...project.assets.map(a=>a.url)])].map(src=>{const i=project.assets.findIndex(a=>a.url===src);return {value:src,label:i===0?'Товар':i>0?'Фото детали '+i:'Текущее фото'};})}));
     for(const [key,title] of [['brightness','Яркость'],['contrast','Контраст'],['saturation','Насыщенность']])host.append(field(title,n[key]??1,'range',v=>n[key]=v,{min:0,max:2,step:.05,percent:true}));
@@ -222,25 +243,40 @@ for(const b of document.querySelectorAll('[data-add]'))b.onclick=()=>{
   scene().nodes.push(n);selected=n.id;renderEditor();
 };
 $('add-image').onchange=()=>{const a=project.assets.find(a=>a.id===$('add-image').value);if(!a)return;checkpoint();const n=node('image','Фото',100,200,400,500,{src:a.url,fit:'contain',zoom:1,cropX:0,cropY:0});scene().nodes.push(n);selected=n.id;renderEditor();};
-$('scene-bg').onchange=()=>{checkpoint();const config={...(scene().backgroundSettings||settings),bg:$('scene-bg').value};updateSceneBackground(config);renderBackgroundPanel();};
+let backgroundGesture=false;
+$('scene-bg').onchange=()=>backgroundGesture=false;
+$('scene-bg').oninput=()=>{if(!backgroundGesture){checkpoint();backgroundGesture=true;}const config={...(scene().backgroundSettings||settings),bg:$('scene-bg').value};updateSceneBackground(config);renderBackgroundPanel();};
+function clampCrop(n){
+ if(n.fit!=='cover')return;
+ const img=project.assets.find(a=>a.url===n.src);if(!img)return;
+ n.zoom=Math.max(1,n.zoom||1);const z=Math.max(n.w/img.width,n.h/img.height)*n.zoom;
+ const maxX=Math.max(0,(img.width*z-n.w)/2/n.w*100),maxY=Math.max(0,(img.height*z-n.h)/2/n.h*100);
+ n.cropX=Math.max(-maxX,Math.min(maxX,n.cropX||0));n.cropY=Math.max(-maxY,Math.min(maxY,n.cropY||0));
+}
 function point(event){const r=canvas.getBoundingClientRect();return {x:(event.clientX-r.left)*scene().width/r.width,y:(event.clientY-r.top)*scene().height/r.height};}
 canvas.onpointerdown=event=>{
- if(!scene())return;const p=point(event),unit=scene().width/canvas.getBoundingClientRect().width;
+ if(!scene())return;const p=point(event);
+ if(cropId===selected&&selectedNode()?.type==='image'&&!selectedNode().locked){const n=selectedNode();drag={crop:true,id:n.id,start:p,cropX:n.cropX||0,cropY:n.cropY||0,recorded:false};canvas.setPointerCapture(event.pointerId);event.preventDefault();return;}
+ cropId=null;canvas.dataset.cropping='false';const unit=scene().width/canvas.getBoundingClientRect().width;
  const handle=hitHandle(selectedNode(),p.x,p.y,unit,scene()),n=handle?selectedNode():hitTest(scene(),p.x,p.y);
  selected=n?.id||null;sidebarTab(false);renderLayers();renderProperties();draw();canvas.focus();
  if(n){drag={...startTransform(n,handle,p),id:n.id,recorded:false};canvas.setPointerCapture(event.pointerId);event.preventDefault();}
 };
 canvas.onpointermove=event=>{
  if(!scene())return;const p=point(event),n=selectedNode(),unit=scene().width/canvas.getBoundingClientRect().width;
- if(!drag){const handle=hitHandle(n,p.x,p.y,unit,scene());canvas.style.cursor=handle?cursorForHandle(handle,n.rotation):hitTest(scene(),p.x,p.y)?'move':'default';return;}
- if(!n)return;
+ if(!drag){if(cropId===n?.id){canvas.style.cursor='grab';return;}const handle=hitHandle(n,p.x,p.y,unit,scene());canvas.style.cursor=handle?cursorForHandle(handle,n.rotation):hitTest(scene(),p.x,p.y)?'move':'default';return;}
+ if(!n||drag?.wheel)return;
  if(!drag.recorded&&Math.hypot(p.x-drag.start.x,p.y-drag.start.y)>2*unit){checkpoint();drag.recorded=true;clearHarmony();}
- if(!drag.recorded)return;applyTransform(n,drag,p,event.shiftKey);canvas.style.cursor=drag.mode==='rotate'?'grabbing':drag.mode==='resize'?cursorForHandle(drag.handle,n.rotation):'move';draw();
+ if(!drag.recorded)return;
+ if(drag.crop){const a=-(n.rotation||0)*Math.PI/180,dx=p.x-drag.start.x,dy=p.y-drag.start.y;n.cropX=drag.cropX+(dx*Math.cos(a)-dy*Math.sin(a))/n.w*100;n.cropY=drag.cropY+(dx*Math.sin(a)+dy*Math.cos(a))/n.h*100;clampCrop(n);canvas.style.cursor='grabbing';draw();return;}
+ applyTransform(n,drag,p,event.shiftKey);canvas.style.cursor=drag.mode==='rotate'?'grabbing':drag.mode==='resize'?cursorForHandle(drag.handle,n.rotation):'move';draw();
 };
 const finishDrag=()=>{if(drag?.recorded){renderProperties();renderAssessment();renderLayers();draw();}drag=null;canvas.style.cursor='default';};
 canvas.onpointerup=finishDrag;canvas.onpointercancel=finishDrag;canvas.onlostpointercapture=finishDrag;
-canvas.ondblclick=()=>{if(selectedNode()?.type==='text'){$('properties').querySelector('textarea')?.focus();$('properties').querySelector('textarea')?.select();}};
+canvas.addEventListener('wheel',event=>{const n=selectedNode();if(cropId!==n?.id||n?.type!=='image'||n.locked)return;event.preventDefault();if(!drag){checkpoint();drag={wheel:true};}n.zoom=Math.max(.2,Math.min(6,(n.zoom||1)*Math.exp(-event.deltaY*.001)));clampCrop(n);draw();clearTimeout(canvas.cropTimer);canvas.cropTimer=setTimeout(()=>{drag=null;renderProperties();},180);},{passive:false});
+canvas.ondblclick=()=>{if(selectedNode()?.type==='image'){cropId=selected;renderProperties();draw();return;}if(selectedNode()?.type==='text'){$('properties').querySelector('textarea')?.focus();$('properties').querySelector('textarea')?.select();}};
 window.addEventListener('keydown',event=>{
+  if(event.key==='Escape'){cropId=null;renderProperties();draw();return;}
   if($('editor-step').hidden||['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName))return;
   if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();event.shiftKey?redo():undo();return;}
   if(event.key==='Delete'||event.key==='Backspace'){event.preventDefault();removeSelected();}
@@ -350,7 +386,7 @@ async function renderTemplatePreviews(){
 function renderDetailRoles(){
  const host=$('detail-roles');host.replaceChildren();if(project.assets.length<2)return;
  host.append(element('h3','Дополнительные изображения'),element('p','Приложение само разместит их в выбранных карточках. При желании уточните назначение.','hint'));
- for(const [i,a] of project.assets.slice(1).entries()){
+ for(const [i,a] of project.assets.filter(a=>a.role==='detail').entries()){
   const row=element('div',undefined,'detail-role'),img=element('img');img.src=a.url;img.alt='Дополнительное изображение '+(i+1);
   const select=element('select');select.setAttribute('aria-label','Назначение детали '+(i+1));
   for(const [value,label] of [['auto','Автоматически'],['decor','Декор рядом с товаром'],['closeup','Крупный план / фото детали'],['kit','Комплектация'],['omit','Не использовать']])select.append(new Option(label,value));
