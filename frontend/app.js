@@ -1,0 +1,287 @@
+import {FONTS,STYLES,TEMPLATES,uid,node,buildScenes,loadImages,loadFonts,renderScene,hitTest,inspectScene,fitText} from './scene.js';
+const $=id=>document.getElementById(id), canvas=$('canvas'),ctx=canvas.getContext('2d');
+let project=null, settings={style:'studio',format:'1:1',bg:STYLES.studio.bg,pedestal:'none',pedestalColor:'#d8c7ad',bubble:'rounded',font:FONTS[0],templates:['hero'],background:null};
+let active=0,selected=null,history=[],future=[],pollToken=0,drag=null,toastTimer,nameTouched=false,dirty=false;
+const scene=()=>project?.scenes[active], selectedNode=()=>scene()?.nodes.find(n=>n.id===selected);
+const clone=value=>JSON.parse(JSON.stringify(value));
+function element(tag,content,className){const el=document.createElement(tag);if(content!==undefined)el.textContent=content;if(className)el.className=className;return el;}
+function button(text,callback,className){const el=element('button',text,className);el.type='button';el.addEventListener('click',()=>run(callback));return el;}
+function message(text){$('message').textContent=text;$('message').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('message').hidden=true,6500);}
+async function run(fn){try{return await fn();}catch(e){console.error(e);message(e.message||'Не удалось выполнить действие');}}
+async function api(url,options={}){const response=await fetch(url,options);let data;try{data=await response.json();}catch{throw Error('Сервер вернул некорректный ответ');}if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail||'Ошибка сервера'));return data;}
+function showStep(id){['upload','design','product','editor'].forEach((s,i)=>{$(`${s}-step`).hidden=s!==id;$('steps').children[i].classList.toggle('active',s===id);});window.scrollTo({top:0,behavior:'smooth'});}
+function checkpoint(){history.push(JSON.stringify(project.scenes));if(history.length>60)history.shift();future=[];dirty=true;$('undo').disabled=false;$('redo').disabled=true;}
+function undo(){if(!history.length)return;future.push(JSON.stringify(project.scenes));project.scenes=JSON.parse(history.pop());active=Math.min(active,project.scenes.length-1);selected=null;dirty=true;renderEditor();}
+function redo(){if(!future.length)return;history.push(JSON.stringify(project.scenes));project.scenes=JSON.parse(future.pop());selected=null;dirty=true;renderEditor();}
+function syncDesign(){
+  for(const [id,key] of [['format','format'],['bg-color','bg'],['pedestal','pedestal'],['pedestal-color','pedestalColor'],['bubble','bubble'],['design-font','font']])$(id).value=settings[key];
+  renderChoices();
+}
+function renderChoices(){
+  $('style-options').replaceChildren(...Object.entries(STYLES).map(([key,s])=>{
+    const b=button('',()=>{settings.style=key;settings.bg=s.bg;syncDesign();},'style-choice'+(settings.style===key?' selected':''));
+    b.setAttribute('aria-pressed',String(settings.style===key));b.append(element('span','',`style-art ${key}`),element('strong',s.name),element('small',s.note));return b;
+  }));
+  $('template-options').replaceChildren(...TEMPLATES.map(([id,num,title,desc])=>{
+    const b=button('',()=>{if(settings.templates.includes(id)){if(settings.templates.length===1)return message('Оставьте хотя бы один шаблон');settings.templates=settings.templates.filter(x=>x!==id);}else{if(settings.templates.length===4)return message('За один проход можно создать до четырёх карточек');settings.templates.push(id);}renderChoices();},'template-choice'+(settings.templates.includes(id)?' selected':''));
+    b.setAttribute('aria-pressed',String(settings.templates.includes(id)));const copy=element('span');copy.append(element('strong',title),element('small',desc));b.append(element('span',num),copy);return b;
+  }));$('template-count').textContent=`${settings.templates.length} / 4`;
+}
+for(const select of document.querySelectorAll('.font-select'))FONTS.forEach(font=>select.append(new Option(font,font)));
+for(const [id,key] of [['format','format'],['bg-color','bg'],['pedestal','pedestal'],['pedestal-color','pedestalColor'],['bubble','bubble'],['design-font','font']])$(id).addEventListener('input',()=>{settings[key]=$(id).value;});
+$('clear-bg').onclick=()=>{settings.background=null;$('bg-file').value='';message('Фотография фона убрана');};
+$('bg-file').onchange=()=>run(async()=>{const file=$('bg-file').files[0];if(!file)return;const data=new FormData();data.set('image',file);const result=await api(`/api/projects/${project.id}/background`,{method:'POST',body:data});settings.background=result.url;message('Фон загружен');});
+let previewUrl=null;
+$('product-file').onchange=()=>{if(previewUrl)URL.revokeObjectURL(previewUrl);$('upload-preview').replaceChildren();const file=$('product-file').files[0];if(file){previewUrl=URL.createObjectURL(file);const img=element('img');img.src=previewUrl;img.alt='Предпросмотр товара';$('upload-preview').append(img);}};
+$('upload-form').onsubmit=event=>{event.preventDefault();run(async()=>{
+  if($('detail-files').files.length>5)throw Error('Можно добавить до пяти фотографий деталей');
+  const data=new FormData($('upload-form'));
+  for(const key of ['remove_product_background','remove_details_background','use_ocr','use_vision'])data.set(key,$('upload-form').elements[key].checked?'true':'false');
+  if(!$('detail-files').files.length)data.delete('details');
+  const submit=$('upload-form').querySelector('[type=submit]');submit.disabled=true;
+  try{project=await api('/api/projects',{method:'POST',body:data});localStorage.setItem('agrovision.project',project.id);showStep('design');poll(project.id);}finally{submit.disabled=false;}
+});};
+async function poll(id){
+  const token=++pollToken;
+  const tick=async()=>{
+    if(token!==pollToken)return;
+    try{
+      const result=await api(`/api/projects/${id}`);if(token!==pollToken)return;project=result;renderJob();
+      if(['queued','running'].includes(project.job.status))setTimeout(tick,1100);
+    }catch(e){message('Не удалось получить статус: '+e.message);if(token===pollToken)setTimeout(tick,4000);}
+  };await tick();
+}
+function renderJob(){
+  const job=project.job,host=$('job-status');host.replaceChildren(element('strong',job.stage));
+  if(['queued','running'].includes(job.status)){
+    const progress=element('progress');progress.max=job.total||1;progress.value=job.completed;host.append(progress,element('small',`Готово этапов: ${job.completed} из ${job.total}. Длительность этапов различается.`));
+  }
+  $('job-warnings').replaceChildren(...job.warnings.map(w=>element('p',w,'warning')));
+  $('to-product').disabled=['queued','running'].includes(job.status);$('retry').hidden=['queued','running'].includes(job.status);
+}
+$('retry').onclick=()=>run(async()=>{await api(`/api/projects/${project.id}/retry`,{method:'POST'});poll(project.id);});
+$('to-product').onclick=()=>{renderProduct();showStep('product');};
+$('back-design').onclick=()=>{readProduct();syncDesign();showStep('design');};
+const suggestionsFor=category=>{
+  if(/мёд|сыр|чай|кофе|продукт/i.test(category))return ['Масса / объём','Состав','Срок годности','Условия хранения','Комплектация'];
+  if(/одеж|обув|сумк/i.test(category))return ['Размер','Материал','Цвет','Уход','Комплектация'];
+  return ['Основная характеристика','Материал','Ширина','Высота','Комплектация'];
+};
+function renderSuggestions(){
+  const labels=[...new Set([...suggestionsFor($('category').value),'Ширина','Высота'])];
+  $('suggestions').replaceChildren(...labels.map(label=>button('＋ '+label,()=>addFact(label))));
+}
+function addFact(label='Характеристика',value='',source='user'){
+  if(project.product.facts.length>=30)return message('До 30 характеристик в одном проекте');
+  project.product.facts.push({label,value,source,confirmed:false});renderFacts();$('confirmed').checked=false;
+}
+function renderFacts(){
+  $('facts').replaceChildren(...project.product.facts.map((fact,i)=>{
+    const row=element('div',undefined,'fact'),fields=element('div',undefined,'fields');
+    const label=element('input');label.value=fact.label;label.placeholder='Характеристика';label.maxLength=100;label.setAttribute('aria-label','Название характеристики');
+    const value=element('input');value.value=fact.value;value.placeholder='Введите известное значение';value.maxLength=500;value.setAttribute('aria-label','Значение характеристики');
+    const check=element('input');check.type='checkbox';check.checked=fact.confirmed;
+    const confirmedLabel=element('label',undefined,'check');confirmedLabel.append(check,document.createTextNode('Подтверждаю'));
+    const footer=element('div',undefined,'fact-footer');footer.append(confirmedLabel,element('small',fact.source==='ocr'?'Источник: OCR':'Источник: пользователь'),button('×',()=>{project.product.facts.splice(i,1);$('confirmed').checked=false;renderFacts();}));
+    label.oninput=()=>{fact.label=label.value;fact.confirmed=false;check.checked=false;$('confirmed').checked=false;};
+    value.oninput=()=>{fact.value=value.value;fact.confirmed=false;check.checked=false;$('confirmed').checked=false;};
+    check.onchange=()=>{if(check.checked&&(!fact.label.trim()||!fact.value.trim())){check.checked=false;message('Сначала заполните название и значение');}fact.confirmed=check.checked;$('confirmed').checked=false;};
+    fields.append(label,value);row.append(fields,footer);return row;
+  }));
+}
+function renderProduct(){
+  $('return-editor').hidden=!project.scenes.length;
+  const p=project.product;$('category').value=p.category;$('product-name').value=p.name;$('description').value=p.description;$('confirmed').checked=p.confirmed;nameTouched=Boolean(p.name&&p.name!==p.category);
+  $('recognition-images').replaceChildren(...project.assets.map(a=>{const img=element('img');img.src=a.url;img.alt=a.role==='product'?'Обработанный товар':'Деталь';return img;}));
+  $('categories').replaceChildren(...project.recognition.categories.map(c=>button(c.category+(c.source==='ocr'?' · по тексту':` · сходство ${Math.round((c.similarity||0)*100)}%`),()=>{$('category').value=c.category;categoryChanged();})));
+  $('recognition-note').textContent=project.recognition.note||'Выберите категорию и введите сведения вручную.';
+  $('ocr-results').replaceChildren(...project.recognition.text.map(row=>{
+    const b=button('',()=>addFact('Текст этикетки',row.text,'ocr'),'ocr-row');b.append(document.createTextNode(row.text),element('small',`OCR ${Math.round(row.confidence*100)}% · ${row.asset_id}`));return b;
+  }));
+  if(!project.recognition.text.length)$('ocr-results').append(element('p','Текст не распознан. Можно заполнить сведения вручную.','hint'));
+  if(!p.category&&project.recognition.categories.length){$('category').value=project.recognition.categories[0].category;categoryChanged();}
+  renderFacts();renderSuggestions();
+}
+function categoryChanged(){if(!nameTouched)$('product-name').value=$('category').value;renderSuggestions();$('confirmed').checked=false;}
+$('category').oninput=categoryChanged;$('product-name').oninput=()=>{nameTouched=true;$('confirmed').checked=false;};$('description').oninput=()=>{$('confirmed').checked=false;};
+$('add-fact').onclick=()=>addFact();
+$('compose-description').onclick=()=>{
+  const facts=project.product.facts.filter(f=>f.confirmed&&f.value.trim());
+  $('description').value=[($('product-name').value||$('category').value).trim(),...facts.map(f=>`${f.label}: ${f.value}`)].filter(Boolean).join('. ')+'.';$('confirmed').checked=false;
+};
+function readProduct(){
+  const facts=project.product.facts.filter(f=>f.label.trim()&&f.value.trim());
+  project.product={category:$('category').value.trim(),name:$('product-name').value.trim()||$('category').value.trim(),description:$('description').value.trim(),facts,confirmed:$('confirmed').checked};
+}
+$('build').onclick=()=>run(async()=>{
+  readProduct();if(!project.product.category||!project.product.name)throw Error('Укажите категорию и название товара');
+  if(project.scenes.length&&!confirm('Пересобрать карточки? Изменения в редакторе будут заменены новыми композициями.'))return;
+  await loadFonts();const newScenes=buildScenes(project,settings);await loadImages(newScenes);
+  project.scenes=newScenes;project.settings=clone(settings);active=0;selected=null;history=[];future=[];dirty=true;
+  await save();showStep('editor');renderEditor();
+});
+$('back-product').onclick=()=>{renderProduct();showStep('product');};
+$('return-editor').onclick=()=>run(async()=>{readProduct();await save();showStep('editor');renderEditor();message('Сведения сохранены. Тексты и оформление существующих карточек остаются как в редакторе.');});
+async function save(){
+  if(!project)return;
+  const result=await api(`/api/projects/${project.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({product:project.product,settings,scenes:project.scenes})});
+  project.assessment=result.assessment;dirty=false;renderAssessment();message('Проект сохранён');
+}
+$('save').onclick=()=>run(save);
+function draw(){if(scene())renderScene(ctx,scene(),selected);}
+function renderEditor(){
+  $('scene-tabs').replaceChildren(...project.scenes.map((s,i)=>button(`${i+1}. ${s.title}`,()=>{active=i;selected=null;renderEditor();},i===active?'selected':'')));
+  canvas.width=scene().width;canvas.height=scene().height;canvas.style.aspectRatio=`${scene().width}/${scene().height}`;
+  // CSS sets both display dimensions to the scene ratio; object-fit never adds a hit-test margin.
+  const wrap=$('canvas-wrap'),available=wrap.clientWidth-46,maxHeight=window.innerHeight*.66;
+  const scale=Math.min(available/scene().width,maxHeight/scene().height);
+  canvas.style.width=`${Math.max(150,scene().width*scale)}px`;canvas.style.height=`${Math.max(150/scene().width*scene().height,scene().height*scale)}px`;
+  $('scene-bg').value=scene().background;$('editor-title').textContent=scene().title;
+  $('add-image').replaceChildren(new Option('Выберите изображение',''),...project.assets.map((a,i)=>new Option(i?'Фото детали '+i:'Товар',a.id)));
+  renderLayers();renderProperties();draw();renderAssessment();$('undo').disabled=!history.length;$('redo').disabled=!future.length;
+  run(async()=>{await loadImages(project.scenes);draw();});
+}
+function renderLayers(){
+  $('layers').replaceChildren(...[...scene().nodes].reverse().map(n=>{
+    const row=element('div',undefined,'layer'+(n.id===selected?' active':''));
+    const choose=button(n.title,()=>{selected=n.id;renderLayers();renderProperties();draw();},'layer-name');choose.title=n.title;
+    const eye=button(n.visible?'◉':'○',()=>{checkpoint();n.visible=!n.visible;renderEditor();});eye.title=n.visible?'Скрыть':'Показать';
+    const lock=button(n.locked?'▣':'◇',()=>{checkpoint();n.locked=!n.locked;renderEditor();});lock.title=n.locked?'Разблокировать':'Заблокировать';
+    row.append(choose,eye,lock);return row;
+  }));
+}
+function field(title,value,type,onChange,options={}){
+  const label=element('label',title),input=element(type==='textarea'?'textarea':type==='select'?'select':'input');
+  if(type==='select')for(const option of options.values)input.append(new Option(option,option));
+  else if(type!=='textarea')input.type=type;
+  if(type==='textarea'){input.rows=4;input.maxLength=3000;}
+  for(const key of ['min','max','step'])if(options[key]!==undefined)input[key]=options[key];
+  input.value=value;input.dataset.property=options.key||title;
+  input.addEventListener('change',()=>run(()=>{
+    let next=type==='number'?Number(input.value):input.value;
+    if(type==='number'){
+      if(!Number.isFinite(next))throw Error('Введите конечное число');
+      next=Math.max(Number(options.min??-10000),Math.min(Number(options.max??10000),next));input.value=next;
+    }
+    checkpoint();onChange(next);draw();renderAssessment();renderLayers();
+    if(selectedNode()?.type==='image')run(async()=>{await loadImages(project.scenes);draw();});
+  }));label.append(input);return label;
+}
+function renderProperties(){
+  const host=$('properties'),n=selectedNode();host.replaceChildren();
+  if(!n){host.append(element('p','Выберите объект на холсте или в списке слоёв.','hint'));return;}
+  const tools=element('div',undefined,'layer-tools');
+  tools.append(button('↓ Слой',()=>moveLayer(-1)),button('↑ Слой',()=>moveLayer(1)));
+  host.append(field('Название слоя',n.title,'text',v=>n.title=v),tools);
+  const geometry=element('div',undefined,'fields');
+  for(const [key,title] of [['x','X'],['y','Y'],['w','Ширина'],['h','Высота']])geometry.append(field(title,Math.round(n[key]),'number',v=>n[key]=v,{min:['w','h'].includes(key)?1:-5000,max:10000,key}));
+  host.append(geometry,field('Поворот, °',n.rotation,'number',v=>n.rotation=v,{min:-360,max:360}),field('Непрозрачность',n.opacity,'number',v=>n.opacity=v,{min:0,max:1,step:.05}));
+  if(n.type==='text'){
+    host.append(field('Текст',n.text,'textarea',v=>{n.text=v;n.placeholder=false;},{key:'text'}),field('Шрифт',n.font,'select',v=>n.font=v,{values:FONTS}),field('Размер шрифта',n.fontSize,'number',v=>n.fontSize=v,{min:8,max:300}),field('Выравнивание',n.align,'select',v=>n.align=v,{values:['left','center','right']}));
+    host.append(button(n.bold?'Жирный: да':'Жирный: нет',()=>{checkpoint();n.bold=!n.bold;renderEditor();}));
+    host.append(button('Вписать текст в блок',()=>{checkpoint();fitText(n,ctx,8);renderEditor();}));
+  }
+  if(n.fill)host.append(field('Цвет',n.fill,'color',v=>n.fill=v));
+  if(n.type==='shape')host.append(field('Форма',n.shape,'select',v=>n.shape=v,{values:['rect','rounded','capsule','ellipse','blob']}));
+  if(['shape','image'].includes(n.type))host.append(field('Скругление',n.radius||0,'number',v=>n.radius=v,{min:0,max:500}));
+  if(n.type==='pedestal')host.append(field('Подставка',n.kind,'select',v=>n.kind=v,{values:['cylinder','box']}));
+  if(n.type==='image'){
+    host.append(field('Размещение',n.fit,'select',v=>n.fit=v,{values:['contain','cover']}),field('Масштаб внутри рамки',n.zoom||1,'number',v=>n.zoom=v,{min:.1,max:6,step:.1}),field('Сдвиг фото X, %',n.cropX||0,'number',v=>n.cropX=v,{min:-100,max:100}),field('Сдвиг фото Y, %',n.cropY||0,'number',v=>n.cropY=v,{min:-100,max:100}));
+    host.append(field('Заменить фото',n.src,'select',v=>n.src=v,{values:[...new Set([n.src,...project.assets.map(a=>a.url)])]}));
+    for(const [key,title] of [['brightness','Яркость'],['contrast','Контраст'],['saturation','Насыщенность']])host.append(field(title,n[key]??1,'number',v=>n[key]=v,{min:0,max:2,step:.05}));
+  }
+  if(n.type==='line'){
+    host.append(field('Толщина линии',n.lineWidth,'number',v=>n.lineWidth=v,{min:1,max:30}),button(n.arrow?'Стрелка: да':'Стрелка: нет',()=>{checkpoint();n.arrow=!n.arrow;renderEditor();}),button('Изменить направление',()=>{checkpoint();n.flip=!n.flip;renderEditor();}));
+  }
+  host.append(element('hr'),button('Дублировать',duplicate),button('Удалить элемент',removeSelected));
+  if(n.locked){host.append(element('p','Слой заблокирован. Разблокируйте его в списке слоёв.','warning'));for(const input of host.querySelectorAll('input,textarea,select,button'))input.disabled=true;}
+}
+function moveLayer(delta){const n=selectedNode();if(!n||n.locked)return;const list=scene().nodes,index=list.indexOf(n),target=index+delta;if(target<0||target>=list.length)return;checkpoint();[list[index],list[target]]=[list[target],list[index]];renderEditor();}
+function duplicate(){const n=selectedNode();if(!n||n.locked)return;checkpoint();const copy={...clone(n),id:uid(),title:n.title+' · копия',x:n.x+20,y:n.y+20};scene().nodes.push(copy);selected=copy.id;renderEditor();}
+function removeSelected(){const n=selectedNode();if(!n||n.locked)return;checkpoint();scene().nodes=scene().nodes.filter(x=>x.id!==selected);selected=null;renderEditor();}
+for(const b of document.querySelectorAll('[data-add]'))b.onclick=()=>{
+  if(scene().nodes.length>=100)return message('В сцене допустимо до 100 элементов');
+  checkpoint();const kind=b.dataset.add,S=Math.min(scene().width,scene().height),x=scene().width*.15,y=scene().height*.35;
+  let n;
+  if(kind==='text')n=node('text','Новый текст',x,y,S*.5,S*.18,{text:'Ваш текст',font:settings.font,fontSize:40,fill:STYLES[settings.style].ink,align:'left'});
+  else if(kind==='pedestal')n=node('pedestal','Подставка',x,y,S*.5,S*.13,{fill:settings.pedestalColor,kind:'cylinder'});
+  else if(kind==='line')n=node('line','Линия',x,y,S*.4,1,{fill:'#839b67',lineWidth:3,arrow:true});
+  else n=node('shape','Фигура',x,y,S*.4,S*.2,{fill:'#d1dcbc',shape:kind,radius:30});
+  scene().nodes.push(n);selected=n.id;renderEditor();
+};
+$('add-image').onchange=()=>{const a=project.assets.find(a=>a.id===$('add-image').value);if(!a)return;checkpoint();const n=node('image','Фото',100,200,400,500,{src:a.url,fit:'contain',zoom:1,cropX:0,cropY:0});scene().nodes.push(n);selected=n.id;renderEditor();};
+$('scene-bg').onchange=()=>{checkpoint();scene().background=$('scene-bg').value;draw();};
+function point(event){const r=canvas.getBoundingClientRect();return {x:(event.clientX-r.left)*scene().width/r.width,y:(event.clientY-r.top)*scene().height/r.height};}
+canvas.onpointerdown=event=>{
+  if(!scene())return;const p=point(event),n=hitTest(scene(),p.x,p.y);selected=n?.id||null;renderLayers();renderProperties();draw();canvas.focus();
+  if(n){drag={id:n.id,start:p,x:n.x,y:n.y,recorded:false};canvas.setPointerCapture(event.pointerId);}
+};
+canvas.onpointermove=event=>{
+  if(!drag)return;const p=point(event);if(!drag.recorded&&Math.hypot(p.x-drag.start.x,p.y-drag.start.y)>2){checkpoint();drag.recorded=true;}
+  if(!drag.recorded)return;const n=selectedNode();n.x=Math.round(drag.x+p.x-drag.start.x);n.y=Math.round(drag.y+p.y-drag.start.y);draw();
+};
+const finishDrag=()=>{if(drag?.recorded){renderProperties();renderAssessment();}drag=null;};canvas.onpointerup=finishDrag;canvas.onpointercancel=finishDrag;canvas.onlostpointercapture=finishDrag;
+canvas.ondblclick=()=>{if(selectedNode()?.type==='text'){$('properties').querySelector('textarea')?.focus();$('properties').querySelector('textarea')?.select();}};
+window.addEventListener('keydown',event=>{
+  if($('editor-step').hidden||['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName))return;
+  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();event.shiftKey?redo():undo();return;}
+  if(event.key==='Delete'||event.key==='Backspace'){event.preventDefault();removeSelected();}
+  const n=selectedNode(),directions={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
+  if(n&&!n.locked&&directions[event.key]){event.preventDefault();checkpoint();const d=directions[event.key],step=event.shiftKey?10:1;n.x+=d[0]*step;n.y+=d[1]*step;draw();renderProperties();renderAssessment();}
+});
+$('undo').onclick=undo;$('redo').onclick=redo;
+window.addEventListener('resize',()=>{if(project?.scenes.length&&!$('editor-step').hidden)renderEditor();});
+function renderAssessment(){
+  const host=$('assessment');if(!project?.assessment||!scene())return;const a=project.assessment;
+  host.replaceChildren();const heading=element('div',undefined,'assessment-title');heading.append(element('strong','Готовность сведений'),element('span',`${a.score}%`,'score'));host.append(heading);
+  Object.entries(a.checks).forEach(([label,ok])=>{const row=element('div',undefined,'check-row');row.append(element('span',label),element('span',ok?'✓':'○'));host.append(row);});
+  if(a.missing_fields.length)host.append(element('p','Профиль категории: добавьте '+a.missing_fields.join(', '),'hint'));
+  const issues=[...a.warnings,...inspectScene(scene(),ctx)];
+  issues.forEach(w=>host.append(element('p',w,'warning')));host.append(element('p',a.note,'hint'));
+}
+function download(blob,name){const link=element('a');link.href=URL.createObjectURL(blob);link.download=name;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(link.href),30000);}
+async function pngBlob(s){await loadFonts();await loadImages([s]);const out=document.createElement('canvas'),longSide=Number($('export-size').value),scale=longSide/Math.max(s.width,s.height);out.width=Math.round(s.width*scale);out.height=Math.round(s.height*scale);renderScene(out.getContext('2d'),s);return await new Promise((resolve,reject)=>out.toBlob(blob=>blob?resolve(blob):reject(Error('Не удалось создать PNG')),'image/png'));}
+function exportNotice(){const issues=project.scenes.flatMap(s=>inspectScene(s,ctx));if(issues.length||!project.product.confirmed)message('Экспортирован черновик: проверьте предупреждения и подтвердите сведения перед публикацией.');}
+$('export-png').onclick=()=>run(async()=>{download(await pngBlob(scene()),`agrovision-${active+1}.png`);exportNotice();});
+$('export-json').onclick=()=>run(async()=>{await save();download(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}),'agrovision-project.json');});
+// ZIP with stored PNG entries: no external libraries or paid services.
+function crc32(bytes){let crc=0xffffffff;for(const byte of bytes){crc^=byte;for(let i=0;i<8;i++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}return (crc^0xffffffff)>>>0;}
+function zip(files){
+  const parts=[],central=[];let offset=0,centralSize=0;
+  const header=size=>{const a=new Uint8Array(size);return [a,new DataView(a.buffer)];};
+  for(const file of files){const name=new TextEncoder().encode(file.name),crc=crc32(file.bytes),[local,v]=header(30+name.length);v.setUint32(0,0x04034b50,true);v.setUint16(4,20,true);v.setUint16(6,0x800,true);v.setUint32(14,crc,true);v.setUint32(18,file.bytes.length,true);v.setUint32(22,file.bytes.length,true);v.setUint16(26,name.length,true);local.set(name,30);parts.push(local,file.bytes);
+    const [entry,c]=header(46+name.length);c.setUint32(0,0x02014b50,true);c.setUint16(4,20,true);c.setUint16(6,20,true);c.setUint16(8,0x800,true);c.setUint32(16,crc,true);c.setUint32(20,file.bytes.length,true);c.setUint32(24,file.bytes.length,true);c.setUint16(28,name.length,true);c.setUint32(42,offset,true);entry.set(name,46);central.push(entry);centralSize+=entry.length;offset+=local.length+file.bytes.length;
+  }
+  const [end,v]=header(22);v.setUint32(0,0x06054b50,true);v.setUint16(8,files.length,true);v.setUint16(10,files.length,true);v.setUint32(12,centralSize,true);v.setUint32(16,offset,true);return new Blob([...parts,...central,end],{type:'application/zip'});
+}
+$('export-all').onclick=()=>run(async()=>{const files=[];for(let i=0;i<project.scenes.length;i++)files.push({name:`card-${i+1}.png`,bytes:new Uint8Array(await(await pngBlob(project.scenes[i])).arrayBuffer())});download(zip(files),'agrovision-cards.zip');exportNotice();});
+$('resume').hidden=!localStorage.getItem('agrovision.project');
+$('import-project').onclick=()=>$('project-file').click();
+$('project-file').onchange=()=>run(async()=>{
+  const file=$('project-file').files[0];if(!file)return;
+  if(file.size>2_000_000)throw Error('JSON проекта должен быть не больше 2 МБ');
+  const data=JSON.parse(await file.text());
+  if(data.version!==2||!Array.isArray(data.scenes)||!data.scenes.length||data.scenes.length>4)throw Error('Нужен JSON проекта AgroVision версии 2');
+  for(const s of data.scenes){
+    if(!Number.isFinite(s.width)||!Number.isFinite(s.height)||s.width<320||s.height<320||s.width>3000||s.height>3000||!Array.isArray(s.nodes)||s.nodes.length>100)throw Error('Некорректный размер или состав сцены');
+    for(const n of s.nodes){
+      if(!['text','shape','image','line','pedestal'].includes(n.type)||!['x','y','w','h'].every(k=>Number.isFinite(n[k]))||n.w<0||n.h<0)throw Error('Некорректный элемент сцены');
+      if(n.type==='image'&&(!n.src.startsWith(`/uploads/${data.id}/`)||n.src.includes('..')))throw Error('Некорректный путь к фотографии');
+    }
+  }
+  const existing=await api(`/api/projects/${data.id}`);
+  if(['queued','running'].includes(existing.job.status))throw Error('Дождитесь завершения обработки этого проекта');
+  await loadFonts();await loadImages(data.scenes);
+  if(dirty&&!confirm('Загрузить JSON? Несохранённые изменения будут потеряны.'))return;
+  project={...existing,product:data.product,scenes:data.scenes};settings={...settings,...data.settings};project.settings=clone(settings);
+  history=[];future=[];active=0;selected=null;dirty=true;localStorage.setItem('agrovision.project',project.id);syncDesign();await save();showStep('editor');renderEditor();
+});
+$('resume').onclick=()=>run(async()=>{
+  if(dirty&&!confirm('Открыть сохранённую версию? Несохранённые изменения будут потеряны.'))return;
+  project=await api(`/api/projects/${localStorage.getItem('agrovision.project')}`);settings={...settings,...project.settings};syncDesign();
+  if(['queued','running'].includes(project.job.status)){showStep('design');poll(project.id);}
+  else if(project.scenes.length){await loadFonts();await loadImages(project.scenes);active=0;selected=null;history=[];future=[];showStep('editor');renderEditor();}
+  else{renderJob();showStep('design');}
+});
+window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
+syncDesign();

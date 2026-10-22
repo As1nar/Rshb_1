@@ -1,0 +1,4 @@
+-r requirements.txt
+-r requirements-background.txt
+-r requirements-ocr.txt
+-r requirements-vision.txt

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AgroVision · Карточка за три минуты</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header><a class="brand" href="/">◈ <b>AgroVision</b></a><span>Из фотографии — в готовую историю товара</span><button id="import-project">Открыть JSON</button><input id="project-file" type="file" accept="application/json,.json" hidden><button id="resume" hidden>Открыть последний проект</button></header>
+<main>
+<nav id="steps" aria-label="Этапы"><span class="active">01 · Фотографии</span><span>02 · Оформление</span><span>03 · Сведения</span><span>04 · Редактор</span></nav>
+<section id="upload-step" class="step-panel">
+  <div class="intro"><p class="eyebrow">КАРТОЧКА ТОВАРА ЗА ТРИ МИНУТЫ</p><h1>Ваш товар.<br><em>В лучшем свете.</em></h1><p>Загрузите фотографии, выберите оформление и проверьте сведения. Мы соберём до четырёх карточек — каждую можно изменить.</p></div>
+  <form id="upload-form" class="panel upload-card">
+    <label class="drop">＋<strong>Основное фото товара</strong><span>JPG, PNG или WEBP · до 12 МБ и 24 Мп</span><input id="product-file" name="product_image" type="file" accept="image/png,image/jpeg,image/webp" required></label>
+    <div id="upload-preview" class="thumbs"></div>
+    <label>Дополнительные фото / детали (до 5)<input id="detail-files" name="details" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+    <label class="check"><input name="remove_product_background" type="checkbox" checked> Удалить фон у товара</label>
+    <label class="check"><input name="remove_details_background" type="checkbox"> Удалить фон у деталей</label>
+    <details><summary>Локальное распознавание</summary><label class="check"><input name="use_ocr" type="checkbox" checked> Читать этикетки (EasyOCR)</label><label class="check"><input name="use_vision" type="checkbox" checked> Предлагать категории (CLIP)</label><small>Первый запуск загружает модели. Можно отключить и ввести сведения вручную.</small></details>
+    <button class="primary" type="submit">Начать создание <span>→</span></button>
+  </form>
+</section>
+<section id="design-step" class="step-panel" hidden>
+  <div class="section-heading"><p class="eyebrow">02 / ОФОРМЛЕНИЕ</p><h1>Задайте настроение.</h1><p>Пока обрабатываются фотографии, выберите основу будущих карточек.</p></div>
+  <div class="design-grid"><div class="panel">
+    <h2>Стиль</h2><div id="style-options" class="choice-grid"></div>
+    <div class="fields"><label>Формат<select id="format"><option value="1:1">Квадрат · 1:1</option><option value="16:9">Альбом · 16:9</option><option value="9:16">История · 9:16</option></select></label><label>Цвет фона<input id="bg-color" type="color" value="#f3eee5"></label></div>
+    <label>Фотография фона (необязательно)<input id="bg-file" type="file" accept="image/png,image/jpeg,image/webp"></label><button id="clear-bg" class="subtle" type="button">Убрать фото фона</button>
+    <div class="fields"><label>Подставка<select id="pedestal"><option value="none">Без подставки</option><option value="cylinder">Низкий цилиндр</option><option value="box">Прямоугольная</option></select></label><label>Цвет подставки<input id="pedestal-color" type="color" value="#d8c7ad"></label></div>
+    <div class="fields"><label>Текстовые блоки<select id="bubble"><option value="rounded">Скруглённые</option><option value="capsule">Капсулы</option><option value="rect">Прямоугольные</option><option value="none">Без плашек</option></select></label><label>Шрифт<select id="design-font" class="font-select"></select></label></div>
+  </div><div class="panel"><h2>Содержимое карточек <small id="template-count">1 / 4</small></h2><p>Выберите от одного до четырёх. Каждый шаблон станет отдельной карточкой.</p><div id="template-options" class="template-grid"></div><div id="job-status" class="status" role="status"></div><div id="job-warnings"></div><div class="actions"><button id="retry" hidden>Повторить обработку</button><button id="to-product" class="primary" disabled>Далее: сведения →</button></div></div></div>
+</section>
+<section id="product-step" class="step-panel" hidden>
+  <div class="section-heading"><p class="eyebrow">03 / ПРОВЕРКА СВЕДЕНИЙ</p><h1>Красиво. И по существу.</h1><p>Распознавание предлагает варианты. Только вы подтверждаете факты.</p></div>
+  <div class="design-grid"><div class="panel"><h2>Что удалось распознать</h2><div id="recognition-images" class="thumbs"></div><div id="categories" class="chips"></div><small id="recognition-note"></small><h3>Текст с фотографий</h3><div id="ocr-results"></div><p class="hint">Нажмите на фрагмент, чтобы перенести его в характеристику. Даже уверенный OCR может ошибаться.</p></div>
+  <div class="panel"><div class="fields"><label>Категория<input id="category" placeholder="Например, Мёд" maxlength="150"></label><label>Название на карточке<input id="product-name" maxlength="200" placeholder="По умолчанию — категория"></label></div><h3>Характеристики</h3><div id="suggestions" class="chips"></div><div id="facts"></div><button id="add-fact">＋ Своя характеристика</button><label>Описание<textarea id="description" rows="3" maxlength="3000" placeholder="Только известные сведения"></textarea></label><button id="compose-description">Составить из подтверждённых фактов</button><label class="check confirmation"><input id="confirmed" type="checkbox"> Я проверил(а) название, описание и отмеченные характеристики</label><div class="actions"><button id="back-design">← Оформление</button><button id="return-editor" hidden>Сохранить сведения, оставить композиции</button><button id="build" class="primary">Собрать карточки →</button></div></div></div>
+</section>
+<section id="editor-step" class="step-panel" hidden>
+  <div class="editor-toolbar"><div><p class="eyebrow">04 / РЕДАКТОР</p><h2 id="editor-title">Ваша композиция</h2></div><div class="actions"><button id="back-product">Сведения</button><button id="undo" title="Ctrl+Z">↶</button><button id="redo" title="Ctrl+Shift+Z">↷</button><button id="save">Сохранить</button><button id="export-json">Проект JSON</button><button id="export-all">Все PNG · ZIP</button><button id="export-png" class="primary">Скачать PNG ↓</button></div></div>
+  <div id="scene-tabs" class="scene-tabs"></div>
+  <div class="editor-grid"><aside class="panel"><h3>Элементы</h3><div class="add-grid"><button data-add="text">＋ Текст</button><button data-add="rounded">＋ Плашка</button><button data-add="rect">＋ Прямоугольник</button><button data-add="ellipse">＋ Эллипс</button><button data-add="line">＋ Линия</button><button data-add="pedestal">＋ Подставка</button></div><label>Добавить фото<select id="add-image"><option value="">Выберите изображение</option></select></label><h3>Слои <small>сверху — передний план</small></h3><div id="layers"></div></aside>
+  <div class="workspace"><div id="canvas-wrap"><canvas id="canvas" width="1200" height="1200" tabindex="0" aria-label="Композиция. Выберите слой для редактирования"></canvas></div><p class="hint">Перетаскивайте объекты · двойной щелчок по тексту — редактирование · стрелки — сдвиг · Delete — удалить</p><div class="fields compact"><label>Длинная сторона PNG<select id="export-size"><option value="1200">1200 px</option><option value="2000">2000 px</option><option value="3000">3000 px</option></select></label><label>Фон текущей карточки<input id="scene-bg" type="color"></label></div><div id="assessment" class="panel"></div></div>
+  <aside class="panel properties"><h3>Свойства элемента</h3><div id="properties"><p>Выберите объект на холсте или в списке слоёв.</p></div></aside></div>
+</section>
+<div id="message" role="status" aria-live="polite" hidden></div>
+</main><footer>AgroVision / локальное распознавание · графика из кода · факты под вашим контролем</footer><script type="module" src="/app.js"></script>
+</body></html>
