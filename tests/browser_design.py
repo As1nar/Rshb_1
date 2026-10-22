@@ -32,11 +32,11 @@ with sync_playwright() as p:
     assert page.locator('#background-mode').input_value()=='diagonal'
     page.locator('#design-palettes .palette-choice').first.click()
     page.locator('#pedestal').select_option('box')
+    page.screenshot(path=out/'agro-design.png',full_page=True)
+    page.locator('#to-product').click();page.locator('#category').fill('Мёд');page.locator('#product-name').fill('Цветочный мёд')
     page.locator('#template-options button').nth(1).click()
     page.locator('#template-options button').nth(3).click()
     page.locator('#template-options button').nth(6).click()
-    page.screenshot(path=out/'agro-design.png',full_page=True)
-    page.locator('#to-product').click();page.locator('#category').fill('Мёд');page.locator('#product-name').fill('Цветочный мёд')
     for label,value in [('Масса / объём','250 г'),('Состав','Мёд'),('Комплектация','Банка с крышкой')]:
         page.get_by_role('button',name='＋ '+label,exact=True).click()
         row=page.locator('.fact').last;row.locator('input').nth(1).fill(value);row.locator('[type=checkbox]').check()
@@ -62,7 +62,7 @@ with sync_playwright() as p:
     assert all('brightness' not in n for s in data['scenes'] for n in s['nodes'] if n.get('backgroundRole'))
     assert any(n.get('kind')=='box' for n in data['scenes'][0]['nodes'])
     assert any(n.get('zoom',1)>1 for n in data['scenes'][2]['nodes'] if n['type']=='image')
-    assert all(len(s['nodes'])<20 for s in data['scenes'])
+    assert all(len(s['nodes'])<28 for s in data['scenes'])
     # Sparse layouts never show unfilled advertising claims or placeholders.
     assert not any(n.get('placeholder') for s in data['scenes'] for n in s['nodes'])
     page.locator('#tab-element').click();page.locator('#canvas').scroll_into_view_if_needed()

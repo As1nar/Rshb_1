@@ -15,15 +15,19 @@ with sync_playwright() as p:
       const photo=document.createElement('canvas');photo.width=400;photo.height=600;
       const pc=photo.getContext('2d');pc.fillStyle='#a88749';pc.fillRect(50,50,300,500);
       const src=photo.toDataURL();
+      const leaf=document.createElement('canvas');leaf.width=150;leaf.height=150;const lc=leaf.getContext('2d');lc.fillStyle='#32854f';lc.beginPath();lc.ellipse(75,75,60,38,.6,0,Math.PI*2);lc.fill();
+      const detail=document.createElement('canvas');detail.width=150;detail.height=150;const dc=detail.getContext('2d');dc.fillStyle='#e7b140';dc.fillRect(0,0,150,150);dc.fillStyle='#79613d';dc.fillRect(35,25,75,95);
+      const extraSources=[leaf.toDataURL(),detail.toDataURL()];
       const facts=[['Масса / объём','250 г'],['Состав','Мёд'],['Ширина','8 см'],['Высота','15 см'],['Комплектация','Банка с крышкой']].map(([label,value])=>({label,value,confirmed:true}));
-      const project={product:{name:'Мёд цветочный',category:'Мёд',description:'Цветочный мёд. Масса: 250 г.',facts},assets:[{url:src,role:'product'}]};
-      let count=0;const issues=[];
+      const project={product:{name:'Мёд цветочный',category:'Мёд',description:'Цветочный мёд. Масса: 250 г.',facts},assets:[{id:'image_0',url:src,role:'product'},{id:'image_1',url:extraSources[0],role:'detail'},{id:'image_2',url:extraSources[1],role:'detail'}]};
+      await m.loadImages([{nodes:project.assets.map(a=>({type:'image',src:a.url}))}]);let count=0;const issues=[];
       for(const style of Object.keys(m.STYLES))for(const format of ['1:1','16:9','9:16','3:4'])for(const [template] of m.TEMPLATES){
         const settings={style,format,bg:m.STYLES[style].bg,font:m.FONTS[0],pedestal:'cylinder',pedestalColor:'#d8c7ad',bubble:'rounded',templates:[template]};
         const [scene]=m.buildScenes(project,settings);await m.loadImages([scene]);
         const canvas=document.createElement('canvas');canvas.width=scene.width;canvas.height=scene.height;
         m.renderScene(canvas.getContext('2d'),scene);
         if(!canvas.toDataURL().startsWith('data:image/png'))throw Error('PNG failed');
+        for(const id of ['image_1','image_2'])if(!scene.nodes.some(n=>n.assetId===id))throw Error('Missing uploaded image '+template+' '+id);
         if(scene.nodes.some(n=>!Number.isFinite(n.x)||n.w<0||n.h<0))throw Error('Invalid geometry');
         const problems=m.inspectScene(scene,canvas.getContext('2d'));
         if(problems.length)issues.push({style,format,template,problems});

@@ -83,7 +83,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="AgroVision API", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="AgroVision API", version="2.2.0", lifespan=lifespan)
 
 
 class Fact(BaseModel):
