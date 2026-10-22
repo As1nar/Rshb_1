@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-import re
 
 from PIL import Image, ImageOps
 
@@ -69,36 +68,6 @@ PRODUCT_LABELS = [
     ("Другое", "a consumer product photographed on a plain background"),
 ]
 
-OCR_HINTS = {
-    "Чай": ("чай", "tea", "matcha", "матча", "earl grey", "эрл грей"),
-    "Кофе": ("кофе", "coffee", "espresso", "эспрессо", "arabica", "арабика"),
-    "Мёд": ("мед", "мёд", "honey", "пчел", "nectar"),
-    "Сыр": ("сыр", "cheese", "gouda", "чеддер", "cheddar", "моцарелла"),
-    "Молоко и молочные продукты": ("молоко", "milk", "йогурт", "yogurt", "кефир", "сливки"),
-    "Шоколад и конфеты": ("шоколад", "chocolate", "candy", "конфет", "какао"),
-    "Печенье и выпечка": ("печенье", "cookie", "biscuit", "вафли", "мука", "круассан"),
-    "Сок и напитки": ("сок", "juice", "лимонад", "напиток", "drink"),
-    "Вода": ("вода", "water", "минеральная"),
-    "Специи и приправы": ("специи", "приправа", "перец", "cinnamon", "корица", "salt", "соль"),
-    "Масло": ("масло", "oil", "olive oil", "оливковое"),
-    "Соус": ("соус", "sauce", "кетчуп", "ketchup", "майонез"),
-    "Крупы и макароны": ("макароны", "pasta", "рис", "rice", "гречка", "овсяные хлопья"),
-    "Косметика для лица": ("крем", "cream", "serum", "сыворотка", "face", "skin"),
-    "Шампунь и уход за волосами": ("шампунь", "shampoo", "hair", "волос"),
-    "Мыло и гигиена": ("мыло", "soap", "гигиена", "toothpaste", "зубная паста"),
-    "Парфюмерия": ("парфюм", "perfume", "fragrance", "eau de", "туалетная вода"),
-    "Бытовая химия": ("cleaner", "detergent", "моющее", "чистящее", "стиральный"),
-    "Корм для животных": ("корм", "pet food", "для кошек", "для собак", "cat food", "dog food"),
-    "Одежда": ("размер", "size", "cotton", "хлопок", "футболка", "shirt"),
-    "Смартфоны и электроника": ("smartphone", "смартфон", "телефон", "bluetooth", "wireless"),
-    "Наушники и аудио": ("наушники", "headphones", "earbuds", "speaker"),
-}
-
-
-def normalize_text(value: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-zа-яё0-9]+", " ", value.lower())).strip()
-
-
 @lru_cache(maxsize=1)
 def _load_model():
     import torch
@@ -112,8 +81,8 @@ def _load_model():
     return torch, processor, model, device
 
 
-def classify_product_image(image_path: str | Path, ocr_text: list[str] | None = None, top_k: int = 5) -> dict:
-    """Rank broad product categories from image and optionally OCR text, fully locally."""
+def classify_product_image(image_path: str | Path, top_k: int = 5) -> dict:
+    """Rank product categories from the image only, fully locally."""
     torch, processor, model, device = _load_model()
     with Image.open(image_path) as source:
         image = ImageOps.exif_transpose(source).convert("RGBA")
@@ -128,22 +97,17 @@ def classify_product_image(image_path: str | Path, ocr_text: list[str] | None = 
         outputs = model(**inputs)
         similarities = outputs.logits_per_image[0].float().cpu().tolist()
 
-    ocr_joined = normalize_text(" ".join(ocr_text or []))
     probabilities = torch.softmax(torch.tensor(similarities, dtype=torch.float32), dim=0).tolist()
     scored = []
     for (category, description), raw_similarity, probability in zip(PRODUCT_LABELS, similarities, probabilities):
-        matched_terms = [term for term in OCR_HINTS.get(category, ()) if normalize_text(term) in ocr_joined]
         score = float(probability)
-        if matched_terms:
-            score += min(0.25, 0.08 * len(matched_terms))
         scored.append({
             "category": category,
             "description": description,
             "similarity": round(float(probability), 4),
             "raw_similarity": round(float(raw_similarity), 4),
-            "ocr_matches": matched_terms,
             "combined_score": round(score, 4),
-            "source": "image+ocr" if matched_terms else "image",
+            "source": "image",
         })
     scored.sort(key=lambda item: item["combined_score"], reverse=True)
     candidates = scored[:max(1, min(top_k, 10))]
@@ -152,7 +116,7 @@ def classify_product_image(image_path: str | Path, ocr_text: list[str] | None = 
         "available": True,
         "model": MODEL_NAME,
         "device": device,
-        "method": "local zero-shot image-text matching with optional OCR hints",
+        "method": "local zero-shot image classification",
         "top_category": candidates[0]["category"],
         "candidates": candidates,
         "needs_confirmation": True,
@@ -161,9 +125,9 @@ def classify_product_image(image_path: str | Path, ocr_text: list[str] | None = 
     }
 
 
-def classify_product_image_safe(image_path: str | Path, ocr_text: list[str] | None = None, top_k: int = 5) -> dict:
+def classify_product_image_safe(image_path: str | Path, top_k: int = 5) -> dict:
     try:
-        return classify_product_image(image_path, ocr_text=ocr_text, top_k=top_k)
+        return classify_product_image(image_path, top_k=top_k)
     except ImportError as error:
         return {
             "available": False,

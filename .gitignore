@@ -6,3 +6,5 @@ results/
 .pytest_cache/
 test-results/
 playwright-report/
+
+.model-cache/

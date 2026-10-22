@@ -6,7 +6,6 @@ from unittest import TestCase, main
 from unittest.mock import patch
 from types import SimpleNamespace
 import time
-import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image
 import backend_main as backend
@@ -38,7 +37,7 @@ class ProjectAPI(TestCase):
 
     def create(self,**options):
         response=self.client.post('/api/projects',files={'product_image':('photo.png',png(),'image/png')},data={
-            'remove_product_background':'false','use_ocr':'false','use_vision':'false',**options})
+            'remove_product_background':'false','use_vision':'false',**options})
         self.assertEqual(response.status_code,202,response.text)
         return self.wait(response.json()['id'])
 
@@ -54,7 +53,7 @@ class ProjectAPI(TestCase):
     def test_manual_flow_and_persistent_scene_order(self):
         p=self.create()
         self.assertEqual(len(p['assets']),1)
-        self.assertEqual(p['recognition']['text'],[])
+        self.assertNotIn('text',p['recognition'])
         payload={'product':{'category':'Мёд','name':'Цветочный мёд','description':'Мёд, 250 г.',
             'confirmed':True,'facts':[{'label':'Масса / объём','value':'250 г','confirmed':True},{'label':'Состав','value':'Мёд','confirmed':True}]},
             'settings':{'style':'organic'},'scenes':[{'id':'s1','nodes':[{'id':'back','type':'shape'},{'id':'front','type':'text','text':'Мёд'}]}]}
@@ -73,52 +72,78 @@ class ProjectAPI(TestCase):
 
     def test_non_png_without_removal_is_supported(self):
         raw=BytesIO();Image.new('RGB',(50,60),'red').save(raw,format='JPEG')
-        result=self.client.post('/api/projects',files={'product_image':('a.jpg',raw.getvalue(),'image/jpeg')},data={'remove_product_background':'false','use_ocr':'false','use_vision':'false'})
+        result=self.client.post('/api/projects',files={'product_image':('a.jpg',raw.getvalue(),'image/jpeg')},data={'remove_product_background':'false','use_vision':'false'})
         self.assertEqual(result.status_code,202)
         self.wait(result.json()['id'])
 
-    def test_real_ocr_adapter_receives_original_rgb_array(self):
-        seen=[]
-        class Reader:
-            def __init__(self,*args,**kwargs):pass
-            def readtext(self,image,**kwargs):
-                assert isinstance(image,np.ndarray)
-                assert image.shape==(800,700,3)
-                seen.append(True)
-                return [([[0,0],[100,0],[100,30],[0,30]],'Мёд 250 г',.83)]
-        old=backend.ocr_reader;backend.ocr_reader=None
-        try:
-            with patch.dict('sys.modules',{'easyocr':SimpleNamespace(Reader=Reader)}):
-                p=self.create(use_ocr='true')
-            self.assertTrue(seen)
-            self.assertEqual(p['recognition']['text'][0]['confidence'],.83)
-            self.assertEqual(p['recognition']['categories'][0]['category'],'Мёд')
-            self.assertFalse(p['product']['confirmed'])
-        finally:backend.ocr_reader=old
+    def test_object_recognition_remains_image_only(self):
+        with patch('product_recognition.classify_product_image_safe',return_value={'available':True,'candidates':[{'category':'Мёд','source':'image','similarity':.7}]}) as model:
+            p=self.create(use_vision='true')
+        self.assertEqual(model.call_count,1)
+        self.assertEqual(len(model.call_args.args),1)
+        self.assertEqual(p['recognition']['categories'][0]['category'],'Мёд')
+        self.assertNotIn('text',p['recognition'])
+        self.assertFalse(p['product']['confirmed'])
 
-    def test_missing_ocr_is_reported_and_manual_flow_survives(self):
-        old=backend.ocr_reader;backend.ocr_reader=None
-        try:
-            with patch.dict('sys.modules',{'easyocr':None}):
-                p=self.create(use_ocr='true')
-            self.assertTrue(any('OCR недоступен' in w for w in p['job']['warnings']))
-            self.assertEqual(p['job']['completed'],p['job']['total'])
-        finally:backend.ocr_reader=old
+    def test_text_recognition_is_absent_from_contract(self):
+        fields=self.client.get('/openapi.json').json()['components']['schemas']
+        upload_schema=next(value for name,value in fields.items() if name.startswith('Body_create_project'))
+        self.assertNotIn('use_ocr',upload_schema['properties'])
+        self.assertIn('background_quality',upload_schema['properties'])
 
     def test_background_pipeline_uses_cutout_and_keeps_original(self):
         def cutout(image,**kwargs):
             im=Image.new('RGBA',image.size)
             im.paste('green',(100,100,500,700))
             return im
-        old=backend.background_session;backend.background_session=None
+        old=backend.background_sessions;backend.background_sessions={}
         try:
-            with patch.dict('sys.modules',{'rembg':SimpleNamespace(new_session=lambda _:object(),remove=cutout)}):
+            with patch.dict('sys.modules',{'onnxruntime':SimpleNamespace(SessionOptions=lambda:SimpleNamespace()),'rembg':SimpleNamespace(new_session=lambda *args,**kwargs:object(),remove=cutout)}):
                 p=self.create(remove_product_background='true')
             a=p['assets'][0]
             self.assertNotEqual(a['url'],a['original'])
             self.assertEqual((a['width'],a['height']),(400,600))
             self.assertTrue((backend.BASE/a['original'].lstrip('/')).exists())
-        finally:backend.background_session=old
+        finally:backend.background_sessions=old
+
+    def test_fast_mode_and_repeated_image_use_cache(self):
+        calls=[]
+        def remove(image,**kwargs):
+            calls.append(image.size)
+            result=Image.new('RGBA',image.size);result.paste('red',(10,10,image.width-10,image.height-10));return result
+        old=backend.background_sessions;backend.background_sessions={}
+        # Unique original avoids cache from other tests.
+        original=backend.UPLOADS/'unique.png';Image.new('RGB',(2400,1600),'orange').save(original)
+        try:
+            with patch.dict('sys.modules',{'onnxruntime':SimpleNamespace(SessionOptions=lambda:SimpleNamespace()),'rembg':SimpleNamespace(new_session=lambda *a,**kw:object(),remove=remove)}):
+                first,method=backend.make_cutout(original,'fast')
+                second,again=backend.make_cutout(original,'fast')
+            self.assertEqual(method,'u2netp');self.assertEqual(again,'cache')
+            self.assertEqual(calls,[(1024,683)])
+            self.assertEqual(first.size,(2400,1600));self.assertEqual(second.size,first.size)
+        finally:backend.background_sessions=old;original.unlink()
+
+    def test_transparent_png_never_invokes_model(self):
+        original=backend.UPLOADS/'transparent.png'
+        image=Image.new('RGBA',(800,900));image.paste('green',(200,200,600,700));image.save(original)
+        try:
+            with patch.dict('sys.modules',{'rembg':None}):
+                cutout,method=backend.make_cutout(original,'detail')
+            self.assertEqual(method,'transparent')
+            self.assertEqual(cutout.getchannel('A').getbbox(),(200,200,600,700))
+        finally:original.unlink()
+
+    def test_invalid_background_mode_rejected(self):
+        response=self.client.post('/api/projects',files={'product_image':('photo.png',png(),'image/png')},data={'background_quality':'invalid'})
+        self.assertEqual(response.status_code,422)
+
+    def test_transparent_margin_trim_without_model(self):
+        raw=BytesIO();image=Image.new('RGBA',(1000,1200));image.paste('green',(100,200,700,900));image.save(raw,format='PNG')
+        response=self.client.post('/api/projects',files={'product_image':('trim.png',raw.getvalue(),'image/png')},data={'remove_product_background':'false','use_vision':'false'})
+        p=self.wait(response.json()['id']);asset=p['assets'][0]
+        self.assertEqual((asset['width'],asset['height']),(600,700))
+        self.assertNotEqual(asset['url'],asset['original'])
+        self.assertTrue((backend.BASE/asset['original'].lstrip('/')).exists())
 
     def test_unconfirmed_fact_does_not_complete_requirements(self):
         p=self.create()

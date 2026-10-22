@@ -10,9 +10,12 @@ from uuid import UUID, uuid4
 import copy
 import json
 import logging
+import hashlib
+import time
+import os
+from typing import Literal
 import re
 
-import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -26,8 +29,8 @@ executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="images")
 storage_lock = Lock()
 model_lock = Lock()
 log = logging.getLogger("agrovision")
-background_session = None
-ocr_reader = None
+background_sessions = {}
+BACKGROUND_MODES = {"fast": ("u2netp", 1024), "balanced": ("u2net", 1600), "detail": ("birefnet-general", 2400)}
 MAX_BYTES = 12 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 24_000_000
 
@@ -45,7 +48,13 @@ def load_project(project_id: str) -> dict:
     with storage_lock:
         if not path.exists():
             raise HTTPException(404, "Проект не найден")
-        return json.loads(path.read_text(encoding="utf-8"))
+        project = json.loads(path.read_text(encoding="utf-8"))
+        # Keep old projects editable without retaining the removed text-recognition pipeline.
+        project.get("recognition", {}).pop("text", None)
+        project.get("options", {}).pop("ocr", None)
+        for fact in project.get("product", {}).get("facts", []):
+            fact["source"] = "user"
+        return project
 
 
 def write_project(project: dict) -> None:
@@ -74,13 +83,13 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="AgroVision API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="AgroVision API", version="2.1.0", lifespan=lifespan)
 
 
 class Fact(BaseModel):
     label: str = Field(min_length=1, max_length=100)
     value: str = Field(min_length=1, max_length=500)
-    source: str = Field(default="user", pattern="^(user|ocr)$")
+    source: str = Field(default="user", pattern="^user$")
     confirmed: bool = False
 
 
@@ -147,7 +156,7 @@ async def create_project(
     details: list[UploadFile] = File(default=[]),
     remove_product_background: bool = Form(True),
     remove_details_background: bool = Form(False),
-    use_ocr: bool = Form(True),
+    background_quality: Literal["fast", "balanced", "detail"] = Form("fast"),
     use_vision: bool = Form(True),
 ):
     if len(details) > 5:
@@ -171,11 +180,19 @@ async def create_project(
                         raise ValueError("pixels")
                     path = folder / f"original_{i}.png"
                     image.save(path)
-                    assets.append({"id": f"image_{i}", "role": "product" if i == 0 else "detail",
+                    asset = {"id": f"image_{i}", "role": "product" if i == 0 else "detail",
                                    "original": f"/uploads/{project_id}/{path.name}",
                                    "url": f"/uploads/{project_id}/{path.name}",
                                    "width": image.width, "height": image.height,
-                                   "remove": remove_product_background if i == 0 else remove_details_background})
+                                   "remove": remove_product_background if i == 0 else remove_details_background}
+                    # Trim transparent margins even when background removal was not requested.
+                    bounds = image.getchannel("A").getbbox()
+                    if bounds and bounds != (0, 0, image.width, image.height):
+                        trimmed = image.crop(bounds)
+                        trimmed_path = folder / f"image_{i}_trim.png"
+                        trimmed.save(trimmed_path)
+                        asset.update(url=f"/uploads/{project_id}/{trimmed_path.name}", width=trimmed.width, height=trimmed.height)
+                    assets.append(asset)
             except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
                 raise HTTPException(415, "Нужно корректное JPG, PNG или WEBP до 24 мегапикселей")
     except Exception:
@@ -183,83 +200,93 @@ async def create_project(
         shutil.rmtree(folder, ignore_errors=True)
         raise
     project = {"id": project_id, "version": 2, "assets": assets,
-               "options": {"ocr": use_ocr, "vision": use_vision},
-               "job": {"status": "queued", "stage": "В очереди", "completed": 0, "total": sum(a["remove"] for a in assets) + int(use_ocr) + int(use_vision), "warnings": []},
-               "recognition": {"text": [], "categories": []},
+               "options": {"background_quality": background_quality, "vision": use_vision},
+               "job": {"status": "queued", "stage": "В очереди", "completed": 0, "total": sum(a["remove"] for a in assets) + int(use_vision), "warnings": []},
+               "recognition": {"categories": []},
                "product": Product().model_dump(), "settings": {}, "scenes": []}
     write_project(project)
     executor.submit(process_project, project_id)
     return project
 
 
+def make_cutout(original: Path, quality: str) -> tuple[Image.Image, str]:
+    """Small fast model by default; retain original RGB and upscale only its alpha."""
+    with Image.open(original) as source:
+        image = source.convert("RGBA")
+    alpha = image.getchannel("A")
+    if alpha.getextrema()[0] < 16:
+        # Already transparent: avoid loading or invoking a model at all.
+        return image, "transparent"
+    model, side = BACKGROUND_MODES[quality]
+    digest = hashlib.sha256((model + ":alpha-v1").encode())
+    with original.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    cache = RESULTS / "cutout-cache"
+    cache.mkdir(exist_ok=True)
+    cached = cache / f"{digest.hexdigest()}.png"
+    if cached.exists():
+        with Image.open(cached) as saved:
+            return saved.convert("RGBA"), "cache"
+    from rembg import new_session, remove
+    with model_lock:
+        if model not in background_sessions:
+            import onnxruntime as ort
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = min(4, os.cpu_count() or 1)
+            options.inter_op_num_threads = 1
+            background_sessions[model] = new_session(model, sess_opts=options, providers=["CPUExecutionProvider"])
+        preview = image.copy()
+        preview.thumbnail((side, side), Image.Resampling.LANCZOS)
+        result = remove(preview, session=background_sessions[model]).convert("RGBA")
+    mask = result.getchannel("A").resize(image.size, Image.Resampling.LANCZOS)
+    image.putalpha(mask)
+    image.save(cached)
+    return image, model
+
+
 def process_project(project_id: str):
-    global background_session, ocr_reader
     project = set_job(project_id, status="running", stage="Подготовка изображений")
     warnings, completed = [], 0
+    started = time.perf_counter()
+    quality = project["options"].get("background_quality", "fast")
     try:
         for asset in project["assets"]:
             if not asset["remove"]:
                 continue
-            set_job(project_id, stage="Удаляем фон: " + ("товар" if asset["role"] == "product" else "деталь"))
+            stage = "Удаляем фон: " + ("товар" if asset["role"] == "product" else "деталь")
+            project["job"]["stage"] = stage
+            write_project(project)
+            step_started = time.perf_counter()
             try:
-                from rembg import new_session, remove
-                with model_lock:
-                    if background_session is None:
-                        background_session = new_session("birefnet-general")
-                    with Image.open(BASE / asset["original"].lstrip("/")) as source:
-                        cutout = remove(source.convert("RGBA"), session=background_session).convert("RGBA")
+                cutout, method = make_cutout(BASE / asset["original"].lstrip("/"), quality)
                 bounds = cutout.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()
                 if not bounds:
                     raise ValueError("На фото не найден непрозрачный объект")
                 cutout = cutout.crop(bounds)
-                output = UPLOADS / project_id / f"{asset['id']}_cutout.png"
+                output = UPLOADS / project_id / f"{asset['id']}_cutout_{quality}.png"
                 cutout.save(output)
-                asset.update(url=f"/uploads/{project_id}/{output.name}", width=cutout.width, height=cutout.height)
+                asset.update(url=f"/uploads/{project_id}/{output.name}", width=cutout.width, height=cutout.height,
+                             background_method=method, background_seconds=round(time.perf_counter()-step_started, 2))
             except Exception as error:
                 log.exception("Background removal failed")
                 warnings.append(f"Фон не удалён ({type(error).__name__}). Используется оригинал. Проверьте requirements-background.txt и доступ к модели.")
             completed += 1
             project["job"].update(completed=completed, warnings=warnings)
             write_project(project)
-        text, categories = [], []
-        if project["options"]["ocr"]:
-            set_job(project_id, stage="Читаем этикетки на исходных фотографиях")
-            try:
-                import easyocr
-                with model_lock:
-                    if ocr_reader is None:
-                        ocr_reader = easyocr.Reader(["ru", "en"], gpu=False)
-                    for asset in project["assets"]:
-                        with Image.open(BASE / asset["original"].lstrip("/")) as source:
-                            rgb = Image.new("RGB", source.size, "white")
-                            rgb.paste(source.convert("RGB"), mask=source.convert("RGBA").getchannel("A"))
-                            rgb.thumbnail((2200, 2200))
-                            rows = ocr_reader.readtext(np.asarray(rgb), detail=1, paragraph=False)
-                        for box, value, confidence in rows:
-                            if value.strip():
-                                text.append({"text": value.strip(), "confidence": round(float(confidence), 3), "asset_id": asset["id"],
-                                             "box": [[float(x), float(y)] for x, y in box], "coordinate_space": list(rgb.size)})
-            except Exception as error:
-                log.exception("OCR failed")
-                warnings.append(f"OCR недоступен ({type(error).__name__}). Установите requirements-ocr.txt, проверьте загрузку моделей или введите сведения вручную.")
-            completed += 1
-        lines = [row["text"] for row in text]
-        if project["options"]["vision"]:
-            set_job(project_id, stage="Предлагаем категории", completed=completed, warnings=warnings)
+        categories = []
+        if project["options"].get("vision", True):
+            project["job"].update(stage="Распознаём объект", completed=completed, warnings=warnings)
+            write_project(project)
             from product_recognition import classify_product_image_safe
-            result = classify_product_image_safe(BASE / project["assets"][0]["original"].lstrip("/"), lines)
+            result = classify_product_image_safe(BASE / project["assets"][0]["url"].lstrip("/"))
             categories = result.get("candidates", [])
             if not result["available"]:
                 warnings.append(result["message"])
             completed += 1
-        from product_recognition import OCR_HINTS, normalize_text
-        normalized = normalize_text(" ".join(lines))
-        for category, terms in OCR_HINTS.items():
-            matches = [term for term in terms if re.search(r"(?<!\w)" + re.escape(normalize_text(term)) + r"(?!\w)", normalized)]
-            if matches and not any(c["category"] == category for c in categories):
-                categories.insert(0, {"category": category, "source": "ocr", "ocr_matches": matches})
-        project["recognition"] = {"text": text, "categories": categories[:5], "note": "Рейтинг CLIP — относительное сходство, не вероятность правильного ответа. Любой результат требует проверки."}
-        project["job"].update(status="done", stage="Обработка завершена — проверьте сведения", completed=completed, warnings=warnings)
+        project["recognition"] = {"categories": categories[:5], "note": "Рейтинг CLIP — относительное сходство, не вероятность правильного ответа. Подтвердите категорию вручную."}
+        project["job"].update(status="done", stage="Готово — выберите оформление и проверьте категорию", completed=completed,
+                              warnings=warnings, elapsed_seconds=round(time.perf_counter()-started, 2))
         write_project(project)
     except Exception as error:
         log.exception("Processing failed")
@@ -273,11 +300,13 @@ def get_project(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/retry", status_code=202)
-def retry(project_id: str):
+def retry(project_id: str, background_quality: Literal["fast", "balanced", "detail"] | None = Form(None)):
     project = load_project(project_id)
     if project["job"]["status"] in {"queued", "running"}:
         raise HTTPException(409, "Обработка уже выполняется")
-    project["job"].update(status="queued", completed=0, warnings=[], stage="Повторная обработка")
+    if background_quality is not None:
+        project["options"]["background_quality"] = background_quality
+    project["job"].update(status="queued", completed=0, total=sum(a["remove"] for a in project["assets"])+int(project["options"].get("vision", True)), warnings=[], stage="Повторная обработка")
     write_project(project)
     executor.submit(process_project, project_id)
     return project

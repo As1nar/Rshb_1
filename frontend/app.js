@@ -1,7 +1,9 @@
-import {FONTS,STYLES,TEMPLATES,uid,node,buildScenes,loadImages,loadFonts,renderScene,hitTest,inspectScene,fitText} from './scene.js';
+import {FONTS,STYLES,TEMPLATES,uid,node,buildScenes,loadImages,loadFonts,renderScene,hitTest,inspectScene,fitText,BACKGROUNDS,applyBackground} from './scene.js';
+import {productProfile,colorSuggestions,harmonyProposal,inkFor,contrast,analyseImage} from './color.js';
 const $=id=>document.getElementById(id), canvas=$('canvas'),ctx=canvas.getContext('2d');
-let project=null, settings={style:'studio',format:'1:1',bg:STYLES.studio.bg,pedestal:'none',pedestalColor:'#d8c7ad',bubble:'rounded',font:FONTS[0],templates:['hero'],background:null};
+let project=null, settings={style:'studio',format:'3:4',bg:STYLES.studio.bg,backgroundMode:STYLES.studio.backgroundMode,secondary:STYLES.studio.soft,accent:STYLES.studio.accent,backgroundStrength:.7,backgroundAngle:125,pedestal:'none',pedestalColor:'#d8c7ad',bubble:'rounded',font:FONTS[0],templates:['hero'],background:null};
 let active=0,selected=null,history=[],future=[],pollToken=0,drag=null,toastTimer,nameTouched=false,dirty=false;
+let profile=null,profileKey=null,previewToken=0,harmony=null,harmonyActive=false;
 const scene=()=>project?.scenes[active], selectedNode=()=>scene()?.nodes.find(n=>n.id===selected);
 const clone=value=>JSON.parse(JSON.stringify(value));
 function element(tag,content,className){const el=document.createElement(tag);if(content!==undefined)el.textContent=content;if(className)el.className=className;return el;}
@@ -15,38 +17,38 @@ function undo(){if(!history.length)return;future.push(JSON.stringify(project.sce
 function redo(){if(!future.length)return;history.push(JSON.stringify(project.scenes));project.scenes=JSON.parse(future.pop());selected=null;dirty=true;renderEditor();}
 function syncDesign(){
   for(const [id,key] of [['format','format'],['bg-color','bg'],['pedestal','pedestal'],['pedestal-color','pedestalColor'],['bubble','bubble'],['design-font','font']])$(id).value=settings[key];
-  renderChoices();
+  renderChoices();syncBackgroundDesign();
 }
 function renderChoices(){
   $('style-options').replaceChildren(...Object.entries(STYLES).map(([key,s])=>{
-    const b=button('',()=>{settings.style=key;settings.bg=s.bg;syncDesign();},'style-choice'+(settings.style===key?' selected':''));
+    const b=button('',()=>{settings.style=key;settings.font=key==='organic'?FONTS[1]:FONTS[0];settings.bg=s.bg;settings.accent=s.accent;settings.secondary=s.soft;settings.backgroundMode=s.backgroundMode;syncDesign();},'style-choice'+(settings.style===key?' selected':''));
     b.setAttribute('aria-pressed',String(settings.style===key));b.append(element('span','',`style-art ${key}`),element('strong',s.name),element('small',s.note));return b;
   }));
   $('template-options').replaceChildren(...TEMPLATES.map(([id,num,title,desc])=>{
-    const b=button('',()=>{if(settings.templates.includes(id)){if(settings.templates.length===1)return message('Оставьте хотя бы один шаблон');settings.templates=settings.templates.filter(x=>x!==id);}else{if(settings.templates.length===4)return message('За один проход можно создать до четырёх карточек');settings.templates.push(id);}renderChoices();},'template-choice'+(settings.templates.includes(id)?' selected':''));
+    const b=button('',()=>{if(settings.templates.includes(id)){if(settings.templates.length===1)return message('Оставьте хотя бы один шаблон');settings.templates=settings.templates.filter(x=>x!==id);}else{if(settings.templates.length===4)return message('За один проход можно создать до четырёх карточек');settings.templates.push(id);}renderChoices();renderDesignPreview();},'template-choice'+(settings.templates.includes(id)?' selected':''));
     b.setAttribute('aria-pressed',String(settings.templates.includes(id)));const copy=element('span');copy.append(element('strong',title),element('small',desc));b.append(element('span',num),copy);return b;
   }));$('template-count').textContent=`${settings.templates.length} / 4`;
 }
 for(const select of document.querySelectorAll('.font-select'))FONTS.forEach(font=>select.append(new Option(font,font)));
-for(const [id,key] of [['format','format'],['bg-color','bg'],['pedestal','pedestal'],['pedestal-color','pedestalColor'],['bubble','bubble'],['design-font','font']])$(id).addEventListener('input',()=>{settings[key]=$(id).value;});
-$('clear-bg').onclick=()=>{settings.background=null;$('bg-file').value='';message('Фотография фона убрана');};
-$('bg-file').onchange=()=>run(async()=>{const file=$('bg-file').files[0];if(!file)return;const data=new FormData();data.set('image',file);const result=await api(`/api/projects/${project.id}/background`,{method:'POST',body:data});settings.background=result.url;message('Фон загружен');});
+for(const [id,key] of [['format','format'],['bg-color','bg'],['pedestal','pedestal'],['pedestal-color','pedestalColor'],['bubble','bubble'],['design-font','font']])$(id).addEventListener('input',()=>{settings[key]=$(id).value;renderDesignPreview();});
+$('clear-bg').onclick=()=>{settings.background=null;$('bg-file').value='';renderDesignPreview();message('Фотография фона убрана');};
+$('bg-file').onchange=()=>run(async()=>{const file=$('bg-file').files[0];if(!file)return;const data=new FormData();data.set('image',file);const result=await api(`/api/projects/${project.id}/background`,{method:'POST',body:data});settings.background=result.url;renderDesignPreview();message('Фон загружен');});
 let previewUrl=null;
 $('product-file').onchange=()=>{if(previewUrl)URL.revokeObjectURL(previewUrl);$('upload-preview').replaceChildren();const file=$('product-file').files[0];if(file){previewUrl=URL.createObjectURL(file);const img=element('img');img.src=previewUrl;img.alt='Предпросмотр товара';$('upload-preview').append(img);}};
 $('upload-form').onsubmit=event=>{event.preventDefault();run(async()=>{
   if($('detail-files').files.length>5)throw Error('Можно добавить до пяти фотографий деталей');
   const data=new FormData($('upload-form'));
-  for(const key of ['remove_product_background','remove_details_background','use_ocr','use_vision'])data.set(key,$('upload-form').elements[key].checked?'true':'false');
+  for(const key of ['remove_product_background','remove_details_background','use_vision'])data.set(key,$('upload-form').elements[key].checked?'true':'false');
   if(!$('detail-files').files.length)data.delete('details');
   const submit=$('upload-form').querySelector('[type=submit]');submit.disabled=true;
-  try{project=await api('/api/projects',{method:'POST',body:data});localStorage.setItem('agrovision.project',project.id);showStep('design');poll(project.id);}finally{submit.disabled=false;}
+  try{project=await api('/api/projects',{method:'POST',body:data});localStorage.setItem('agrovision.project',project.id);showStep('design');renderDesignPreview();poll(project.id);}finally{submit.disabled=false;}
 });};
 async function poll(id){
   const token=++pollToken;
   const tick=async()=>{
     if(token!==pollToken)return;
     try{
-      const result=await api(`/api/projects/${id}`);if(token!==pollToken)return;project=result;renderJob();
+      const result=await api(`/api/projects/${id}`);if(token!==pollToken)return;project=result;renderJob();run(refreshProfile);
       if(['queued','running'].includes(project.job.status))setTimeout(tick,1100);
     }catch(e){message('Не удалось получить статус: '+e.message);if(token===pollToken)setTimeout(tick,4000);}
   };await tick();
@@ -57,9 +59,10 @@ function renderJob(){
     const progress=element('progress');progress.max=job.total||1;progress.value=job.completed;host.append(progress,element('small',`Готово этапов: ${job.completed} из ${job.total}. Длительность этапов различается.`));
   }
   $('job-warnings').replaceChildren(...job.warnings.map(w=>element('p',w,'warning')));
-  $('to-product').disabled=['queued','running'].includes(job.status);$('retry').hidden=['queued','running'].includes(job.status);
+  if(job.elapsed_seconds!==undefined)host.append(element('small',`Обработка: ${job.elapsed_seconds} с. Режим: ${{fast:'быстрый',balanced:'сбалансированный',detail:'сложные контуры'}[project.options.background_quality]||'ранее выбранный'}`));
+  $('to-product').disabled=['queued','running'].includes(job.status);$('retry').hidden=['queued','running'].includes(job.status);$('retry-options').hidden=$('retry').hidden;$('retry-quality').value=project.options.background_quality||'fast';
 }
-$('retry').onclick=()=>run(async()=>{await api(`/api/projects/${project.id}/retry`,{method:'POST'});poll(project.id);});
+$('retry').onclick=()=>run(async()=>{const data=new FormData();data.set('background_quality',$('retry-quality').value);await api(`/api/projects/${project.id}/retry`,{method:'POST',body:data});poll(project.id);});
 $('to-product').onclick=()=>{renderProduct();showStep('product');};
 $('back-design').onclick=()=>{readProduct();syncDesign();showStep('design');};
 const suggestionsFor=category=>{
@@ -82,7 +85,7 @@ function renderFacts(){
     const value=element('input');value.value=fact.value;value.placeholder='Введите известное значение';value.maxLength=500;value.setAttribute('aria-label','Значение характеристики');
     const check=element('input');check.type='checkbox';check.checked=fact.confirmed;
     const confirmedLabel=element('label',undefined,'check');confirmedLabel.append(check,document.createTextNode('Подтверждаю'));
-    const footer=element('div',undefined,'fact-footer');footer.append(confirmedLabel,element('small',fact.source==='ocr'?'Источник: OCR':'Источник: пользователь'),button('×',()=>{project.product.facts.splice(i,1);$('confirmed').checked=false;renderFacts();}));
+    const footer=element('div',undefined,'fact-footer');footer.append(confirmedLabel,element('small','Источник: пользователь'),button('×',()=>{project.product.facts.splice(i,1);$('confirmed').checked=false;renderFacts();}));
     label.oninput=()=>{fact.label=label.value;fact.confirmed=false;check.checked=false;$('confirmed').checked=false;};
     value.oninput=()=>{fact.value=value.value;fact.confirmed=false;check.checked=false;$('confirmed').checked=false;};
     check.onchange=()=>{if(check.checked&&(!fact.label.trim()||!fact.value.trim())){check.checked=false;message('Сначала заполните название и значение');}fact.confirmed=check.checked;$('confirmed').checked=false;};
@@ -93,12 +96,8 @@ function renderProduct(){
   $('return-editor').hidden=!project.scenes.length;
   const p=project.product;$('category').value=p.category;$('product-name').value=p.name;$('description').value=p.description;$('confirmed').checked=p.confirmed;nameTouched=Boolean(p.name&&p.name!==p.category);
   $('recognition-images').replaceChildren(...project.assets.map(a=>{const img=element('img');img.src=a.url;img.alt=a.role==='product'?'Обработанный товар':'Деталь';return img;}));
-  $('categories').replaceChildren(...project.recognition.categories.map(c=>button(c.category+(c.source==='ocr'?' · по тексту':` · сходство ${Math.round((c.similarity||0)*100)}%`),()=>{$('category').value=c.category;categoryChanged();})));
+  $('categories').replaceChildren(...project.recognition.categories.map(c=>button(c.category+(` · сходство ${Math.round((c.similarity||0)*100)}%`),()=>{$('category').value=c.category;categoryChanged();})));
   $('recognition-note').textContent=project.recognition.note||'Выберите категорию и введите сведения вручную.';
-  $('ocr-results').replaceChildren(...project.recognition.text.map(row=>{
-    const b=button('',()=>addFact('Текст этикетки',row.text,'ocr'),'ocr-row');b.append(document.createTextNode(row.text),element('small',`OCR ${Math.round(row.confidence*100)}% · ${row.asset_id}`));return b;
-  }));
-  if(!project.recognition.text.length)$('ocr-results').append(element('p','Текст не распознан. Можно заполнить сведения вручную.','hint'));
   if(!p.category&&project.recognition.categories.length){$('category').value=project.recognition.categories[0].category;categoryChanged();}
   renderFacts();renderSuggestions();
 }
@@ -110,13 +109,13 @@ $('compose-description').onclick=()=>{
   $('description').value=[($('product-name').value||$('category').value).trim(),...facts.map(f=>`${f.label}: ${f.value}`)].filter(Boolean).join('. ')+'.';$('confirmed').checked=false;
 };
 function readProduct(){
-  const facts=project.product.facts.filter(f=>f.label.trim()&&f.value.trim());
+  const facts=project.product.facts.filter(f=>f.label.trim()&&f.value.trim()).map(f=>({...f,source:'user'}));
   project.product={category:$('category').value.trim(),name:$('product-name').value.trim()||$('category').value.trim(),description:$('description').value.trim(),facts,confirmed:$('confirmed').checked};
 }
 $('build').onclick=()=>run(async()=>{
   readProduct();if(!project.product.category||!project.product.name)throw Error('Укажите категорию и название товара');
   if(project.scenes.length&&!confirm('Пересобрать карточки? Изменения в редакторе будут заменены новыми композициями.'))return;
-  await loadFonts();const newScenes=buildScenes(project,settings);await loadImages(newScenes);
+  await refreshProfile();await loadFonts();const newScenes=buildScenes(project,settings);await loadImages(newScenes);
   project.scenes=newScenes;project.settings=clone(settings);active=0;selected=null;history=[];future=[];dirty=true;
   await save();showStep('editor');renderEditor();
 });
@@ -128,9 +127,9 @@ async function save(){
   project.assessment=result.assessment;dirty=false;renderAssessment();message('Проект сохранён');
 }
 $('save').onclick=()=>run(save);
-function draw(){if(scene())renderScene(ctx,scene(),selected);}
+function draw(){if(scene()){const current=harmony&&harmonyActive&&harmony.sceneId===scene().id?harmonizedScene(scene(),harmony.proposal):scene();renderScene(ctx,current,selected);}}
 function renderEditor(){
-  $('scene-tabs').replaceChildren(...project.scenes.map((s,i)=>button(`${i+1}. ${s.title}`,()=>{active=i;selected=null;renderEditor();},i===active?'selected':'')));
+  $('scene-tabs').replaceChildren(...project.scenes.map((s,i)=>button(`${i+1}. ${s.title}`,()=>{active=i;selected=null;clearHarmony();renderEditor();},i===active?'selected':'')));
   canvas.width=scene().width;canvas.height=scene().height;canvas.style.aspectRatio=`${scene().width}/${scene().height}`;
   // CSS sets both display dimensions to the scene ratio; object-fit never adds a hit-test margin.
   const wrap=$('canvas-wrap'),available=wrap.clientWidth-46,maxHeight=window.innerHeight*.66;
@@ -138,7 +137,7 @@ function renderEditor(){
   canvas.style.width=`${Math.max(150,scene().width*scale)}px`;canvas.style.height=`${Math.max(150/scene().width*scene().height,scene().height*scale)}px`;
   $('scene-bg').value=scene().background;$('editor-title').textContent=scene().title;
   $('add-image').replaceChildren(new Option('Выберите изображение',''),...project.assets.map((a,i)=>new Option(i?'Фото детали '+i:'Товар',a.id)));
-  renderLayers();renderProperties();draw();renderAssessment();$('undo').disabled=!history.length;$('redo').disabled=!future.length;
+  renderLayers();renderProperties();renderBackgroundPanel();draw();renderAssessment();$('undo').disabled=!history.length;$('redo').disabled=!future.length;
   run(async()=>{await loadImages(project.scenes);draw();});
 }
 function renderLayers(){
@@ -152,20 +151,30 @@ function renderLayers(){
 }
 function field(title,value,type,onChange,options={}){
   const label=element('label',title),input=element(type==='textarea'?'textarea':type==='select'?'select':'input');
-  if(type==='select')for(const option of options.values)input.append(new Option(option,option));
+  if(type==='select')for(const option of options.values){
+    const names={contain:'Вписать целиком',cover:'Заполнить рамку',left:'По левому краю',center:'По центру',right:'По правому краю',rect:'Прямоугольник',rounded:'Скруглённый',capsule:'Капсула',ellipse:'Эллипс',blob:'Мягкая форма',cylinder:'Цилиндр',box:'Изометрическая платформа'};
+    input.append(new Option(typeof option==='object'?option.label:names[option]||option,typeof option==='object'?option.value:option));
+  }
   else if(type!=='textarea')input.type=type;
   if(type==='textarea'){input.rows=4;input.maxLength=3000;}
   for(const key of ['min','max','step'])if(options[key]!==undefined)input[key]=options[key];
   input.value=value;input.dataset.property=options.key||title;
-  input.addEventListener('change',()=>run(()=>{
-    let next=type==='number'?Number(input.value):input.value;
-    if(type==='number'){
+  let recorded=false;
+  const format=v=>options.percent?Math.round(Number(v)*100)+'%':Number(v).toFixed(options.step<1?2:0);
+  const output=type==='range'?element('output',format(value)):null;
+  const apply=()=>run(()=>{
+    let next=['number','range'].includes(type)?Number(input.value):input.value;
+    if(['number','range'].includes(type)){
       if(!Number.isFinite(next))throw Error('Введите конечное число');
       next=Math.max(Number(options.min??-10000),Math.min(Number(options.max??10000),next));input.value=next;
     }
-    checkpoint();onChange(next);draw();renderAssessment();renderLayers();
+    if(!recorded){checkpoint();recorded=true;}
+    onChange(next);if(output)output.textContent=format(next);draw();renderAssessment();renderLayers();
     if(selectedNode()?.type==='image')run(async()=>{await loadImages(project.scenes);draw();});
-  }));label.append(input);return label;
+  });
+  input.addEventListener(type==='range'?'input':'change',apply);
+  input.addEventListener('change',()=>recorded=false);
+  if(output)label.append(output);label.append(input);return label;
 }
 function renderProperties(){
   const host=$('properties'),n=selectedNode();host.replaceChildren();
@@ -175,23 +184,23 @@ function renderProperties(){
   host.append(field('Название слоя',n.title,'text',v=>n.title=v),tools);
   const geometry=element('div',undefined,'fields');
   for(const [key,title] of [['x','X'],['y','Y'],['w','Ширина'],['h','Высота']])geometry.append(field(title,Math.round(n[key]),'number',v=>n[key]=v,{min:['w','h'].includes(key)?1:-5000,max:10000,key}));
-  host.append(geometry,field('Поворот, °',n.rotation,'number',v=>n.rotation=v,{min:-360,max:360}),field('Непрозрачность',n.opacity,'number',v=>n.opacity=v,{min:0,max:1,step:.05}));
+  host.append(geometry,field('Поворот, °',n.rotation,'range',v=>n.rotation=v,{min:-360,max:360}),field('Непрозрачность',n.opacity,'range',v=>n.opacity=v,{min:0,max:1,step:.05,percent:true}));
   if(n.type==='text'){
-    host.append(field('Текст',n.text,'textarea',v=>{n.text=v;n.placeholder=false;},{key:'text'}),field('Шрифт',n.font,'select',v=>n.font=v,{values:FONTS}),field('Размер шрифта',n.fontSize,'number',v=>n.fontSize=v,{min:8,max:300}),field('Выравнивание',n.align,'select',v=>n.align=v,{values:['left','center','right']}));
+    host.append(field('Текст',n.text,'textarea',v=>{n.text=v;n.placeholder=false;},{key:'text'}),field('Шрифт',n.font,'select',v=>n.font=v,{values:FONTS}),field('Размер шрифта',n.fontSize,'range',v=>n.fontSize=v,{min:8,max:300}),field('Выравнивание',n.align,'select',v=>n.align=v,{values:['left','center','right']}));
     host.append(button(n.bold?'Жирный: да':'Жирный: нет',()=>{checkpoint();n.bold=!n.bold;renderEditor();}));
     host.append(button('Вписать текст в блок',()=>{checkpoint();fitText(n,ctx,8);renderEditor();}));
   }
   if(n.fill)host.append(field('Цвет',n.fill,'color',v=>n.fill=v));
   if(n.type==='shape')host.append(field('Форма',n.shape,'select',v=>n.shape=v,{values:['rect','rounded','capsule','ellipse','blob']}));
-  if(['shape','image'].includes(n.type))host.append(field('Скругление',n.radius||0,'number',v=>n.radius=v,{min:0,max:500}));
-  if(n.type==='pedestal')host.append(field('Подставка',n.kind,'select',v=>n.kind=v,{values:['cylinder','box']}));
+  if(['shape','image'].includes(n.type))host.append(field('Скругление',n.radius||0,'range',v=>n.radius=v,{min:0,max:500}));
+  if(n.type==='pedestal')host.append(field('Подставка',n.kind,'select',v=>n.kind=v,{values:['cylinder','box']}),field('Толщина платформы',n.depth??.36,'range',v=>n.depth=v,{min:.1,max:.65,step:.05}));
   if(n.type==='image'){
-    host.append(field('Размещение',n.fit,'select',v=>n.fit=v,{values:['contain','cover']}),field('Масштаб внутри рамки',n.zoom||1,'number',v=>n.zoom=v,{min:.1,max:6,step:.1}),field('Сдвиг фото X, %',n.cropX||0,'number',v=>n.cropX=v,{min:-100,max:100}),field('Сдвиг фото Y, %',n.cropY||0,'number',v=>n.cropY=v,{min:-100,max:100}));
-    host.append(field('Заменить фото',n.src,'select',v=>n.src=v,{values:[...new Set([n.src,...project.assets.map(a=>a.url)])]}));
-    for(const [key,title] of [['brightness','Яркость'],['contrast','Контраст'],['saturation','Насыщенность']])host.append(field(title,n[key]??1,'number',v=>n[key]=v,{min:0,max:2,step:.05}));
+    host.append(field('Размещение',n.fit,'select',v=>n.fit=v,{values:['contain','cover']}),field('Масштаб внутри рамки',n.zoom||1,'range',v=>n.zoom=v,{min:.1,max:6,step:.1,percent:true}),field('Сдвиг фото X, %',n.cropX||0,'range',v=>n.cropX=v,{min:-100,max:100}),field('Сдвиг фото Y, %',n.cropY||0,'range',v=>n.cropY=v,{min:-100,max:100}));
+    host.append(field('Заменить фото',n.src,'select',v=>n.src=v,{values:[...new Set([n.src,...project.assets.map(a=>a.url)])].map(src=>{const i=project.assets.findIndex(a=>a.url===src);return {value:src,label:i===0?'Товар':i>0?'Фото детали '+i:'Текущее фото'};})}));
+    for(const [key,title] of [['brightness','Яркость'],['contrast','Контраст'],['saturation','Насыщенность']])host.append(field(title,n[key]??1,'range',v=>n[key]=v,{min:0,max:2,step:.05,percent:true}));
   }
   if(n.type==='line'){
-    host.append(field('Толщина линии',n.lineWidth,'number',v=>n.lineWidth=v,{min:1,max:30}),button(n.arrow?'Стрелка: да':'Стрелка: нет',()=>{checkpoint();n.arrow=!n.arrow;renderEditor();}),button('Изменить направление',()=>{checkpoint();n.flip=!n.flip;renderEditor();}));
+    host.append(field('Толщина линии',n.lineWidth,'range',v=>n.lineWidth=v,{min:1,max:30}),button(n.arrow?'Стрелка: да':'Стрелка: нет',()=>{checkpoint();n.arrow=!n.arrow;renderEditor();}),button('Изменить направление',()=>{checkpoint();n.flip=!n.flip;renderEditor();}));
   }
   host.append(element('hr'),button('Дублировать',duplicate),button('Удалить элемент',removeSelected));
   if(n.locked){host.append(element('p','Слой заблокирован. Разблокируйте его в списке слоёв.','warning'));for(const input of host.querySelectorAll('input,textarea,select,button'))input.disabled=true;}
@@ -210,7 +219,7 @@ for(const b of document.querySelectorAll('[data-add]'))b.onclick=()=>{
   scene().nodes.push(n);selected=n.id;renderEditor();
 };
 $('add-image').onchange=()=>{const a=project.assets.find(a=>a.id===$('add-image').value);if(!a)return;checkpoint();const n=node('image','Фото',100,200,400,500,{src:a.url,fit:'contain',zoom:1,cropX:0,cropY:0});scene().nodes.push(n);selected=n.id;renderEditor();};
-$('scene-bg').onchange=()=>{checkpoint();scene().background=$('scene-bg').value;draw();};
+$('scene-bg').onchange=()=>{checkpoint();const config={...(scene().backgroundSettings||settings),bg:$('scene-bg').value};updateSceneBackground(config);renderBackgroundPanel();};
 function point(event){const r=canvas.getBoundingClientRect();return {x:(event.clientX-r.left)*scene().width/r.width,y:(event.clientY-r.top)*scene().height/r.height};}
 canvas.onpointerdown=event=>{
   if(!scene())return;const p=point(event),n=hitTest(scene(),p.x,p.y);selected=n?.id||null;renderLayers();renderProperties();draw();canvas.focus();
@@ -279,9 +288,82 @@ $('project-file').onchange=()=>run(async()=>{
 $('resume').onclick=()=>run(async()=>{
   if(dirty&&!confirm('Открыть сохранённую версию? Несохранённые изменения будут потеряны.'))return;
   project=await api(`/api/projects/${localStorage.getItem('agrovision.project')}`);settings={...settings,...project.settings};syncDesign();
-  if(['queued','running'].includes(project.job.status)){showStep('design');poll(project.id);}
+  if(['queued','running'].includes(project.job.status)){showStep('design');renderDesignPreview();poll(project.id);}
   else if(project.scenes.length){await loadFonts();await loadImages(project.scenes);active=0;selected=null;history=[];future=[];showStep('editor');renderEditor();}
   else{renderJob();showStep('design');}
 });
 window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
+function syncBackgroundDesign(){
+  for(const [id,key] of [['background-mode','backgroundMode'],['bg-secondary','secondary'],['bg-accent','accent'],['bg-strength','backgroundStrength'],['bg-angle','backgroundAngle']])$(id).value=settings[key];
+  $('bg-strength-value').textContent=Math.round(settings.backgroundStrength*100)+'%';$('bg-angle-value').textContent=settings.backgroundAngle+'°';
+  renderPalettes($('design-palettes'),false);renderDesignPreview();
+}
+for(const [key,label] of BACKGROUNDS)$('background-mode').append(new Option(label,key));
+for(const [id,key] of [['background-mode','backgroundMode'],['bg-secondary','secondary'],['bg-accent','accent'],['bg-strength','backgroundStrength'],['bg-angle','backgroundAngle']])$(id).oninput=()=>{settings[key]=['backgroundStrength','backgroundAngle'].includes(key)?Number($(id).value):$(id).value;syncBackgroundDesign();};
+async function refreshProfile(){
+  if(!project)return;
+  const key=project.assets.map(a=>a.url).join('|');
+  if(key===profileKey)return;
+  const id=project.id;
+  const measured=await productProfile(project);
+  if(project.id!==id)return;
+  profile=measured;profileKey=key;settings.focal=profile?.focal;
+  renderPalettes($('design-palettes'),false);renderDesignPreview();
+}
+async function renderDesignPreview(){
+  if(!project||$('design-step').hidden)return;
+  const token=++previewToken;
+  await loadFonts();await loadImages([{nodes:[...project.assets.map(a=>({type:'image',src:a.url})),...(settings.background?[{type:'image',src:settings.background}]:[])]}]);
+  if(token!==previewToken)return;
+  const preview=buildScenes({...project,product:{...project.product,name:project.product.name||'Ваш товар'}},{...settings,templates:['hero']})[0];
+  const cv=$('design-preview');cv.width=preview.width/4;cv.height=preview.height/4;renderScene(cv.getContext('2d'),preview);
+}
+function renderPalettes(host,editor){
+  host.replaceChildren(element('h3','Палитры по цвету товара'));
+  if(!profile){host.append(element('p','Загрузите фотографию — предложим подходящие сочетания.','hint'));return;}
+  const intro=element('div',undefined,'product-color');const dot=element('i');dot.style.background=profile.color;intro.append(dot,element('small','Основной оттенок товара · '+profile.color));host.append(intro);
+  for(const palette of colorSuggestions(profile)){
+    const b=button('',()=>{
+      if(editor){checkpoint();const config={...(scene().backgroundSettings||settings),bg:palette.bg,secondary:palette.secondary,accent:palette.accent};updateSceneBackground(config,true);renderBackgroundPanel();}
+      else{settings.bg=palette.bg;settings.secondary=palette.secondary;settings.accent=palette.accent;settings.pedestalColor=palette.secondary;syncDesign();}
+    },'palette-choice');
+    const swatches=element('span',undefined,'swatches');[palette.bg,palette.secondary,palette.accent].forEach(color=>{const dot=element('i');dot.style.background=color;swatches.append(dot);});
+    const copy=element('span');copy.append(element('strong',palette.name),element('small',palette.note));b.append(swatches,copy);host.append(b);
+  }
+  const current=editor?scene().background:settings.bg;
+  if(contrast(profile.color,current)<1.5)host.append(element('p','Оттенок товара близок к фону. Попробуйте контрастную палитру или более светлый фон.','hint'));
+}
+function updateSceneBackground(config,recolor=false){
+  if(selectedNode()?.backgroundRole)selected=null;
+  if(recolor){const ink=inkFor(config.bg);for(const n of scene().nodes){if(n.type==='text'&&!n.fixedCellInk)n.fill=ink;if(n.type==='pedestal')n.fill=config.secondary;}}
+  applyBackground(scene(),config);$('scene-bg').value=config.bg;draw();renderLayers();
+  run(async()=>{await loadImages([scene()]);draw();});
+}
+function renderBackgroundPanel(){
+  if(!scene())return;const host=$('background-panel'),config={...settings,...scene().backgroundSettings,bg:scene().background};host.replaceChildren(element('h3','Оформление фона'),element('p','Меняйте текущую карточку. Товар и тексты останутся на своих местах.','hint'));
+  const mode=field('Рисунок фона',config.backgroundMode,'select',v=>{config.backgroundMode=v;config.background=null;updateSceneBackground(config);},{values:BACKGROUNDS.map(([id])=>id)});
+  for(const option of mode.querySelectorAll('option'))option.textContent=BACKGROUNDS.find(([id])=>id===option.value)?.[1]||option.value;
+  host.append(mode);
+  for(const [key,label] of [['bg','Основной цвет'],['secondary','Второй цвет'],['accent','Акцент']])host.append(field(label,config[key],'color',v=>{config[key]=v;updateSceneBackground(config);}));
+  host.append(field('Выразительность',config.backgroundStrength??.7,'range',v=>{config.backgroundStrength=v;updateSceneBackground(config);},{min:0,max:1,step:.05,percent:true}),field('Направление',config.backgroundAngle??125,'range',v=>{config.backgroundAngle=v;updateSceneBackground(config);},{min:0,max:360,step:5}));
+  const photo=element('label','Фотография фона'),upload=element('input');upload.type='file';upload.accept='image/png,image/jpeg,image/webp';
+  upload.onchange=()=>run(async()=>{if(!upload.files[0])return;const data=new FormData();data.set('image',upload.files[0]);const result=await api(`/api/projects/${project.id}/background`,{method:'POST',body:data});checkpoint();config.background=result.url;updateSceneBackground(config);renderBackgroundPanel();});photo.append(upload);host.append(photo);
+  if(config.background){
+    host.append(field('Приближение фона',config.backgroundZoom||1,'range',v=>{config.backgroundZoom=v;updateSceneBackground(config);},{min:1,max:3,step:.05,percent:true}),field('Сдвиг фона X',config.backgroundX||0,'range',v=>{config.backgroundX=v;updateSceneBackground(config);},{min:-60,max:60,step:1}),field('Сдвиг фона Y',config.backgroundY||0,'range',v=>{config.backgroundY=v;updateSceneBackground(config);},{min:-60,max:60,step:1}),field('Тонировка',config.photoWash??.12,'range',v=>{config.photoWash=v;updateSceneBackground(config);},{min:0,max:.8,step:.02,percent:true}),button('Убрать фото фона',()=>{checkpoint();config.background=null;updateSceneBackground(config);renderBackgroundPanel();}));
+  }
+  const palettes=element('div',undefined,'palette-panel');renderPalettes(palettes,true);host.append(palettes);
+}
+function sidebarTab(background){$('element-panel').hidden=background;$('background-panel').hidden=!background;$('tab-element').classList.toggle('selected',!background);$('tab-background').classList.toggle('selected',background);}
+$('tab-element').onclick=()=>sidebarTab(false);$('tab-background').onclick=()=>sidebarTab(true);
+function harmonizedScene(s,proposal){const copy=clone(s);for(const n of copy.nodes){const match=proposal.find(p=>p.src===n.src);if(n.type==='image'&&!n.backgroundRole&&match)for(const key of ['brightness','contrast','saturation'])n[key]=match[key];}return copy;}
+function clearHarmony(){harmony=null;harmonyActive=false;$('harmony-preview').hidden=true;}
+$('suggest-harmony').onclick=()=>run(async()=>{
+  await refreshProfile();await loadImages(project.scenes);
+  const input={background:scene().background,nodes:project.assets.map(a=>({type:'image',src:a.url}))};
+  const proposal=harmonyProposal(input);if(!proposal.length)throw Error('Не удалось измерить цвета фотографии');
+  harmony={sceneId:scene().id,proposal};harmonyActive=true;
+  const host=$('harmony-preview');host.hidden=false;host.replaceChildren(element('p','Предпросмотр коррекции. Ограничиваем изменения, чтобы сохранить цвет товара.','hint'));
+  for(const [i,p] of proposal.entries())host.append(element('p',`${i?'Деталь '+i:'Товар'}: яркость ${Math.round(p.brightness*100)}%, контраст ${Math.round(p.contrast*100)}%, насыщенность ${Math.round(p.saturation*100)}%`,'hint'));
+  host.append(button('Сравнить до / после',()=>{harmonyActive=!harmonyActive;draw();message(harmonyActive?'После: предложенная коррекция':'До: текущие настройки');}),button('Применить ко всем карточкам',()=>{checkpoint();project.scenes=project.scenes.map(s=>harmonizedScene(s,proposal));clearHarmony();renderEditor();message('Мягкая коррекция применена ко всем изображениям товара и деталей. Фон не изменён.');},'primary'),button('Отменить предпросмотр',()=>{clearHarmony();draw();}));draw();
+});
 syncDesign();

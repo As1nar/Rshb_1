@@ -1,5 +1,5 @@
 import tempfile
-"""All 63 style/format/template combinations + mobile upload page."""
+"""All 84 style/format/template combinations + desktop resolutions."""
 import os
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -18,7 +18,7 @@ with sync_playwright() as p:
       const facts=[['Масса / объём','250 г'],['Состав','Мёд'],['Ширина','8 см'],['Высота','15 см'],['Комплектация','Банка с крышкой']].map(([label,value])=>({label,value,confirmed:true}));
       const project={product:{name:'Мёд цветочный',category:'Мёд',description:'Цветочный мёд. Масса: 250 г.',facts},assets:[{url:src,role:'product'}]};
       let count=0;const issues=[];
-      for(const style of Object.keys(m.STYLES))for(const format of ['1:1','16:9','9:16'])for(const [template] of m.TEMPLATES){
+      for(const style of Object.keys(m.STYLES))for(const format of ['1:1','16:9','9:16','3:4'])for(const [template] of m.TEMPLATES){
         const settings={style,format,bg:m.STYLES[style].bg,font:m.FONTS[0],pedestal:'cylinder',pedestalColor:'#d8c7ad',bubble:'rounded',templates:[template]};
         const [scene]=m.buildScenes(project,settings);await m.loadImages([scene]);
         const canvas=document.createElement('canvas');canvas.width=scene.width;canvas.height=scene.height;
@@ -34,11 +34,12 @@ with sync_playwright() as p:
       }
       return {count,issues};
     }''')
-    assert result['count']==63,result
+    assert result['count']==84,result
     assert not result['issues'],result['issues']
-    page.set_viewport_size({'width':390,'height':844})
-    assert page.evaluate('document.documentElement.scrollWidth<=window.innerWidth'), 'Mobile horizontal overflow'
-    page.screenshot(path=str(Path(tempfile.gettempdir()) / 'agro-mobile.png'),full_page=True)
+    for width,height in [(1024,768),(1280,720),(1440,900),(1920,1080),(2560,1440)]:
+        page.set_viewport_size({'width':width,'height':height})
+        assert page.evaluate('document.documentElement.scrollWidth<=window.innerWidth'), f'Desktop horizontal overflow: {width}'
+    page.screenshot(path=str(Path(tempfile.gettempdir()) / 'agro-desktop.png'),full_page=True)
     assert not errors,errors
-    print('PASS: 63 style/format/template combinations; no overflow or unconfirmed facts in templates; mobile upload fits')
+    print('PASS: 84 style/format/template combinations; no overflow or unconfirmed facts in templates; five desktop resolutions fit')
     browser.close()
